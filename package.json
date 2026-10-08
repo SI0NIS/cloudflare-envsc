@@ -1,0 +1,17 @@
+{
+  "name": "cloudflare-envsc",
+  "version": "1.0.0",
+  "private": true,
+  "description": "有效传输率每日核查 · Cloudflare Worker 版（KV 去重 + Bark/邮件推送）",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev",
+    "tail": "wrangler tail"
+  },
+  "devDependencies": {
+    "wrangler": "latest"
+  },
+  "dependencies": {
+    "iconv-lite": "^0.7.3"
+  }
+}

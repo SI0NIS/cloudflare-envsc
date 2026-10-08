@@ -1,0 +1,1991 @@
+===== PAGE 1 =====
+I
+企业回流自动监控数据接口说明
+（2025-03-21 V1.6）
+版本号 修订内容 修订时间
+V1.0 新发布 2023.01.01
+V1.1 增加基数信息数据共享接口
+说明
+2024.02.29
+V1.2 1. 完善标记数据类接口
+2. 完善督办信息类接口
+3. 完善企业回流授权方式
+4. 完善企业回流数据接口
+2024.08.10
+V1.3 增加传输率相关接口 2024.09.11
+V1.4
+在线数据类接口补充values
+信息说明，排放口信息接口
+新增是否富氧燃烧及助燃空
+气初始氧含量字段
+2024.12.05
+V1.5
+1.督办单详情接口新增污染
+物编码、名称字段
+2.污染物有效传输率及详情
+接口合并
+2024.12.31
+V1.6 基数类接口、报表类接口存
+在问题处理 2025.03.21
+===== PAGE 2 =====
+2
+目录
+企业回流自动监控数据接口说明 .................................................... 1
+1.1 公共参数 ...............................................................................................................................4
+1.1.1 获取请求头方式 ......................................................................................................... 4
+1.1.2 获取签名sign方式 ....................................................................................................... 4
+1.1.3 获取accessToken方式 ..................................................................................................5
+1.2 接口访问地址 ...................................................................................................................... 5
+1.3 获取公钥 .............................................................................................................................. 5
+1.4 获取accessToken ....................................................................................................................5
+2.1 在线数据类接口 .................................................................................................................. 7
+2.1.1 废气实时数据查询接口........................................................................................................ 7
+2.1.2 废气分钟数据查询接口........................................................................................................ 7
+2.1.3 废气小时数据查询接口........................................................................................................ 8
+2.1.4 废气日数据查询接口.......................................................................................................... 10
+2.1.5 废水实时数据查询接口...................................................................................................... 12
+2.1.6 废水分钟数据查询接口...................................................................................................... 13
+2.1.7 废水小时数据查询接口...................................................................................................... 14
+2.1.8 废水日数据查询接口.......................................................................................................... 16
+2.1.9 火电水泥工况参数数据查询接口...................................................................................... 17
+2.2 标记数据类接口 ................................................................................................................ 19
+2.2.1 通讯中断标记记录查询接口.......................................................................................... 19
+2.2.2 自动监测设备维护标记(污染物)查询接口..................................................................20
+2.2.3 手工监测值录入查询接口.............................................................................................. 21
+2.2.4 非排污单位责任造成数据缺失无效信息....................................................................22
+2.2.5 自动监测设备维护标记(工况参数)查询接口............................................................ 23
+2.2.6 治理设施工况标记查询接口..........................................................................................24
+2.2.7 生产设施工况标记查询接口..........................................................................................26
+2.2.8 CEMS主备切换查询接口.................................................................................................27
+2.3 基础信息类接口 ................................................................................................................ 29
+2.3.1 企业基本信息查询接口...................................................................................................... 29
+2.3.2 数采仪信息查询接口.......................................................................................................... 31
+2.3.3 设备验收记录查询接口...................................................................................................... 32
+2.3.4 监测仪器信息查询接口...................................................................................................... 33
+2.3.5 监测项目信息查询接口...................................................................................................... 35
+2.3.6 监控点信息查询接口.......................................................................................................... 36
+2.3.7 锅炉燃气轮机组信息.......................................................................................................... 38
+2.3.8 水泥窑信息查询接口.......................................................................................................... 38
+2.3.9 排放口信息查询接口.......................................................................................................... 39
+2.4 督办信息类接口 ................................................................................................................ 41
+2.4.1 查询企业对应时段督办明细.............................................................................................. 41
+2.4.2 查询督办企业反馈处理情况.............................................................................................. 42
+2.4.3 根据督办单ID查询督办明细..............................................................................................44
+2.5 烟气废水汇总报表 ............................................................................................................ 46
+2.5.1 查询表头信息...................................................................................................................... 46
+2.5.2 查询监控数据...................................................................................................................... 46
+2.6 有效传输率接口 ................................................................................................................ 48
+===== PAGE 3 =====
+3
+2.6.1 获取传输有效率查询起止时间.......................................................................................... 48
+2.6.2 查询企业传输率.................................................................................................................. 48
+2.6.3 查询污染物有效传输率...................................................................................................... 50
+2.7 基数类数据接口 .................................................................................................................53
+2.7.1 参与联网统计排污单位信息接口 .......................................................................... 53
+===== PAGE 4 =====
+4
+1.1 公共参数
+1.1.1 获取请求头方式
+（注：这里的请求头参数，每个接口都需添加请求头）
+schema
+accessToken 系统生成，登录《重点排污单位自动监控与基础数据库
+系统（企业服务端）》进行数据接口授权:
+1. 生成服务申请码
+2.申请数据回流帐号
+header true string
+Referer http://ip:端口/amOnline/zdjk-company-base/login
+（企业服务端的登录地址）
+header true string
+from out header true string
+Content-
+Type
+application/x-www-form-urlencoded header true string
+1.1.2 获取签名sign方式
+本系统提供生成签名的Api 工具类如下所示 其中TokenId 由运维人员
+提供； API 调用示例(Java 版本)：
+Request request = new Request(taskConfig.getUrl());
+request.setMethod(HttpConstant.Method.POST);
+request.addHeader("accessToken",
+”FC7333AF-4D89-4078-BA90-4F533ED62806”); Map<String, Object> param =
+new HashMap<>(10);
+param.put(“_ts”, (int) (System.currentTimeMillis() / 1000));
+param.put(“sign”, SignUtil.sign(param));
+param.put(Const.START_IN_TIME, startInTime);
+param.put(Const.END_IN_TIME, endInTime);
+param.put(Const.MP_IDS, mpIdsStr);
+request.setRequestBody(HttpRequestBody.form(param, Charsets.UTF_8.name()));
+return request;
+SignUtil.java
+签名工具类
+===== PAGE 5 =====
+5
+1.1.3 获取accessToken方式
+1. 登录《重点排污单位自动监控与基础数据库 系统（企业服务端）》进行
+数据接口授权，生成服务申请码；
+2. 登录《重点排污单位自动监控与基础数据库 系统（企业服务端）》进行数据接口授权，申
+请数据回流账号，通过1.3和1.4接口获得accessToken；
+1.2 接口访问地址
+http://ip:端口/amOnline/app/was/baseroute/requestRoute!databack.page
+1.3 获取公钥
+请求方式:POST
+请求数据类型:application/x-www-form-urlencoded
+请求参数:
+schema
+_ts 时间戳 query true string
+sign 签名 query true string
+authId 帐号id(企业服务端回流接口授权生成) query true string
+method auth/pubilc-key query true string
+响应参数:
+schema
+code 200成功 500失败 string
+data 公钥 string string
+msg 调用成功/调用失败 string
+1.4 获取accessToken
+请求方式:POST
+===== PAGE 6 =====
+6
+请求数据类型:application/x-www-form-urlencoded
+请求参数:
+schema
+_ts 时间戳 query true string
+sign 签名 query true string
+authId 帐号id(数据回流帐号id) query true string
+authSecret authSecret(数据回流帐号key通过获得公钥使用RSA加密后
+产生)
+query true string
+method auth/access-token query true string
+响应参数:
+schema
+code 200成功 500失败 string
+data accessToken string string
+msg 调用成功/调用失败 string
+===== PAGE 7 =====
+7
+2.1 在线数据类接口
+2.1.1 废气实时数据查询接口
+请求方式:POST
+请求数据类型:application/x-www-form-urlencoded
+请求参数:
+schema
+_ts 时间戳 query true string
+end_time 结束时间(yyyy-MM-dd HH:mm:ss),时间跨度不超过1小
+时
+query true string
+mpId 监控点id,可以传递授权企业下多个监控点id以逗号
+(,)隔开,限制10个以内
+query true string
+sign 签名 query true string
+start_time 开始时间(yyyy-MM-dd HH:mm:ss),时间跨度不超过1小
+时
+query true string
+type 1根据data_time查询 2根据update_time查询 query true string
+method getAutoAirRealtimeData query true string
+响应参数:
+schema
+code 200成功 500失败 string
+data 数据对象 array MongodbData
+created_time 创建时间 string
+data_time 监测时间 string
+id id string
+mp_id 监控点id string
+updated_time 更新时间 string
+values 数据 array Document
+pollutant_code 污染物编码 string
+rtd_value 监测值 string
+rtd_zs 折算值 string
+flag 数采仪上报标记 string
+msg 调用成功/调用失败 string
+2.1.2 废气分钟数据查询接口
+请求方式:POST
+===== PAGE 8 =====
+8
+请求数据类型:application/x-www-form-urlencoded
+请求参数:
+schema
+_ts 时间戳 query true string
+end_time 结束时间(yyyy-MM-dd HH:mm:ss),时间跨度不超过1小
+时
+query true string
+mpId 监控点id,可以传递授权企业下多个监控点id 以逗号
+(,)隔开,限制10个以内
+query true string
+sign 签名 query true string
+start_time 开始时间(yyyy-MM-dd HH:mm:ss),时间跨度不超过1小
+时
+query true string
+type 1根据data_time查询 2根据update_time查询 query true string
+method getAutoMinuterAir query true string
+响应参数:
+schema
+code 200成功 500失败 string
+data 数据对象 array MongodbData
+created_time 创建时间 string
+data_time 监测时间 string
+id id string
+mp_id 监控点id string
+updated_time 更新时间 string
+values 数据 array Document
+pollutant_code 污染物编码 string
+cou_value 排放量 string
+min_value 实测最小值 string
+max_value 实测最大值 string
+avg_value 实测值 string
+min_zs 折算最小值 string
+max_zs 折算最大值 string
+avg_zs 折算值 string
+outlet_standard 标准值 string
+flag 数采仪上报标记 string
+msg 调用成功/调用失败 string
+2.1.3 废气小时数据查询接口
+请求方式:POST
+===== PAGE 9 =====
+9
+请求数据类型:application/x-www-form-urlencoded
+请求参数:
+schema
+_ts 时间戳 query true string
+end_time 结束时间(yyyy-MM-dd HH:mm:ss),时间跨度不超过
+7 天
+query true string
+mpId 监控点id,可以传递授权企业下多个监控点id 以逗号
+(,)隔开,限制10个以内
+query true string
+sign 签名 query true string
+start_time 开始时间(yyyy-MM-dd HH:mm:ss),时间跨度不超过
+7 天
+query true string
+type 1根据data_time查询 2根据update_time查询 query true string
+method getAutoHourAir query true string
+响应参数:
+schema
+code 200成功 500失败 string
+data 数据对象 array MongodbData
+created_time 创建时间 string
+data_time 监测时间 string
+id id string
+mp_id 监控点id string
+updated_time 更新时间 string
+values 数据 array Document
+pollutant_code 污染物编码 string
+cou_value 排放量 string
+min_value 实测最小值 string
+max_value 实测最大值 string
+avg_value 实测值 string
+min_zs 折算最小值 string
+max_zs 折算最大值 string
+avg_zs 折算值 string
+outlet_standard 标准值 string
+mstatus 数据状态 0:上报/6补缺 string
+sstatus 设备停运状态 string
+estatus 设备状态 string
+astatus 数据报警状态：
+0:正常 1:超标 2:异常 9:未
+设上下限
+string
+flag 数采仪上报标记 string
+revise_flag 修正标识 string
+revise_flag_subitem 修正标识子项 string
+===== PAGE 10 =====
+10
+cou_revised 修正排放量 string
+revised_text 修正内容 string
+revised_time 修正时间 string
+reviser 修正人 string
+avg_revised 实测修正值 string
+avg_zs_revised 折算修正值 string
+datasource_code 实测浓度计算标识：
+null：实测浓度未计算，1：实测
+浓度计算未计算出值，4：实测浓
+度计算出值
+string
+datasource_hm_code 实测浓度豁免计算值标识：
+null：实测浓度豁免修正值未计
+算，1：实测浓度豁免修正值未计
+算出，4：实测浓度豁免修正值计
+算出值
+string
+avg_hm_revised 实测浓度豁免修正值 string
+avg_zs_hm_revised 折算浓度豁免修正值 string
+rstatus 排放量计算标识：
+null：排放量未计算，1：排放量
+计算未算出值，2：排放量计算算
+出值，3：排放量修约未算出值，
+4：排放量修约算出值
+string
+datasource_reason 浓度未计算出原因 string
+rstatus_reason 排放量未计算出原因 string
+datasource_zs_code 折算浓度计算标识：
+null：折算浓度未计算，1：折算
+浓度计算未计算出值，4：折算浓
+度计算
+string
+datasource_zs_reason 折算浓度未计算出原因 string
+datasource_hm_reason 实测豁免浓度未计算出原因 string
+datasource_zs_hm_code 折算浓度豁免修正值计算标识:
+null：折算浓度豁免修正值未计
+算，1：折算浓度豁免修正值未计
+算出，4：折算浓度豁免修正值计
+算出值
+string
+datasource_zs_hm_reas
+on
+折算豁免浓度未计算出原因 string
+msg 调用成功/调用失败 string
+2.1.4 废气日数据查询接口
+请求方式:POST
+请求数据类型:application/x-www-form-urlencoded
+请求参数:
+===== PAGE 11 =====
+11
+schema
+_ts 时间戳 query true string
+end_time 结束时间(yyyy-MM-dd HH:mm:ss),时间跨度不超过
+90 天
+query true string
+mpId 监控点id,可以传递授权企业下多个监控点id以逗号
+(,)隔开,限制10个以内
+query true string
+sign 签名 query true string
+start_time 开始时间(yyyy-MM-dd HH:mm:ss),时间跨度不超过90
+天
+query true string
+type 1根据data_time查询 2根据update_time查询 query true string
+method getAutoDayAir query true string
+响应参数:
+schema
+code 200成功 500失败 string
+data 数据对象 array MongodbData
+created_time 创建时间 string
+data_time 监测时间 string
+id id string
+mp_id 监控点id string
+updated_time 更新时间 string
+values 数据 array Document
+pollutant_code 污染物编码 string
+cou_value 排放量 string
+min_value 实测最小值 string
+max_value 实测最大值 string
+avg_value 实测值 string
+min_zs 折算最小值 string
+max_zs 折算最大值 string
+avg_zs 折算值 string
+outlet_standard 标准值 string
+mstatus 数据状态 0:上报/6
+补缺
+string
+sstatus 设备停运状态 string
+estatus 设备状态 string
+astatus 数据报警状态：
+0:正常 1:超标 2:
+异常 9:未设上下限
+string
+flag 数采仪上报标记 string
+cou_revised 修正排放量 string
+avg_revised 实测修正值 string
+avg_zs_revised 折算修正值 string
+datasource_code 实测浓度计算标识: string
+===== PAGE 12 =====
+12
+null：实测浓度未计算
+，1：实测浓度计算未
+计算出值，4：实测浓
+度计算出值
+avg_hm_revised 实测浓度豁免修正值 string
+avg_zs_hm_revised 折算浓度豁免修正值 string
+datasource_hm_code 实测浓度豁免计算值
+标识
+string
+rstatus 排放量计算标识:
+null：排放量未计算，
+1：排放量计算未算出
+值，2：排放量计算算
+出值，3：排放量修约
+未算出值，4：排放量
+修约算出值
+string
+datasource_reason 浓度未计算出原因 string
+rstatus_reason 排放量未计算出原因 string
+datasource_zs_code 折算浓度计算标识:
+null：折算浓度未计算
+，1：折算浓度计算未
+计算出值，4：折算浓
+度计算出值
+string
+datasource_zs_reaso
+n
+折算浓度未计算出原
+因
+string
+datasource_hm_reaso
+n
+实测豁免浓度未计算
+出原因
+string
+datasource_zs_hm_co
+de
+折算浓度豁免修正值
+计算标识:
+null：折算浓度豁免修
+正值未计算，1：折算
+浓度豁免修正值未计
+算出，4：折算浓度豁
+免修正值计算出值
+string
+datasource_zs_hm_re
+ason
+折算豁免浓度未计算
+出原因
+string
+msg 调用成功/调用失败 string
+2.1.5 废水实时数据查询接口
+请求方式:POST
+请求数据类型:application/x-www-form-urlencoded
+请求参数:
+schema
+_ts 时间戳 query true string
+===== PAGE 13 =====
+13
+end_time 结束时间(yyyy-MM-dd HH:mm:ss),时间跨度不超过1小
+时
+query true string
+mpId 监控点id,可以传递授权企业下多个监控点id 以逗号
+(,)隔开,限制10个以内
+query true string
+sign 签名 query true string
+start_time 开始时间(yyyy-MM-dd HH:mm:ss),时间跨度不超过1小
+时
+query true string
+type 1根据data_time查询 2根据update_time查询 query true string
+method getAutoWaterRealtimeData query true string
+响应参数:
+schema
+code 200成功 500失败 string
+data 数据对象 array MongodbData
+created_time 创建时间 string
+data_time 监测时间 string
+id id string
+mp_id 监控点id string
+updated_time 更新时间 string
+values 数据 array Document
+pollutant_code 污染物编码 string
+rtd_value 监测值 string
+flag 数采仪上报标记 string
+msg 调用成功/调用失败 string
+2.1.6 废水分钟数据查询接口
+请求方式:POST
+请求数据类型:application/x-www-form-urlencoded
+请求参数:
+schema
+_ts 时间戳 query true string
+end_time 结束时间(yyyy-MM-dd HH:mm:ss),时间跨度不超过1小
+时
+query true string
+mpId 监控点id,可以传递授权企业下多个监控点id 以逗号
+(,)隔开,限制10个以内
+query true string
+sign 签名 query true string
+start_time 开始时间(yyyy-MM-dd HH:mm:ss),时间跨度不超过1小
+时
+query true string
+===== PAGE 14 =====
+14
+type 1根据data_time查询 2根据update_time查询 query true string
+method getAutoMinuterWater query true string
+响应参数:
+schema
+code 200成功 500失败 string
+data 数据对象 array MongodbData
+created_time 创建时间 string
+data_time 监测时间 string
+id id string
+mp_id 监控点id string
+updated_time 更新时间 string
+values 数据 array Document
+pollutant_code 污染物编码 string
+cou_value 排放量 string
+min_value 实测最小值 string
+max_value 实测最大值 string
+avg_value 实测值 string
+outlet_standard 标准值 string
+flag 数采仪上报标记 string
+msg 调用成功/调用失败 string
+2.1.7 废水小时数据查询接口
+请求方式:POST
+请求数据类型:application/x-www-form-urlencoded
+请求参数:
+schema
+_ts 时间戳 query true string
+end_time 结束时间(yyyy-MM-dd HH:mm:ss),时间跨度不超过7天 query true string
+mpId 监控点id,可以传递授权企业下多个监控点id 以逗号
+(,)隔开,限制10个以内
+query true string
+sign 签名 query true string
+start_time 开始时间(yyyy-MM-dd HH:mm:ss),时间跨度不超过 7天 query true string
+type 1根据data_time查询 2根据update_time查询 query true string
+method getAutoHourWater query true string
+响应参数:
+===== PAGE 15 =====
+15
+schema
+code 200成功 500
+失败 string
+data 数据对象 array MongodbData
+created_time 创建时间 string
+data_time 监测时间 string
+id id string
+mp_id 监控点id string
+updated_time 更新时间 string
+values 数据 array Document
+pollutant_code 污染物编码 string
+cou_value 排放量 string
+min_value 实测最小值 string
+max_value 实测最大值 string
+avg_value 实测值 string
+outlet_standard 标准值 string
+mstatus 数据状态 0上
+报/6补缺
+string
+sstatus 设备停运状态 string
+estatus 设备状态 string
+astatus 数据报警状态：
+0:正常 1:超标
+2:异常 9:未设
+上下限
+string
+flag 数采仪上报标记 string
+revise_flag 修正标识 string
+revise_flag_subitem 修正标识子项 string
+cou_revised 修正排放量 string
+revised_text 修正内容 string
+revised_time 修正时间 string
+reviser 修正人 string
+msg 调用成功/调
+用失败 string
+===== PAGE 16 =====
+16
+2.1.8 废水日数据查询接口
+请求方式:POST
+请求数据类型:application/x-www-form-urlencoded
+请求参数:
+schema
+_ts 时间戳 query true string
+end_time 结束时间(yyyy-MM-dd HH:mm:ss),时间跨度不超过
+90 天
+query true string
+mpId 监控点id,可以传递授权企业下多个监控点id 以逗号
+(,)隔开,限制10个以内
+query true string
+sign 签名 query true string
+start_time 开始时间(yyyy-MM-dd HH:mm:ss),时间跨度不超过
+90 天
+query true string
+type 1根据data_time查询 2根据update_time查询 query true string
+method getAutoDayWater query true string
+响应参数:
+schema
+code 200 成功 500 失败 string
+data 数据对象 array MongodbData
+created_time 创建时间 string
+data_time 监测时间 string
+id id string
+mp_id 监控点 id string
+updated_time 更新时间 string
+values 数据 array Document
+pollutant_code 污染物编码 string
+min_value 排放量 string
+max_value 实测最小值 string
+avg_value 实测最大值 string
+cou_value 实测值 string
+outlet_standard 标准值 string
+flag 数采仪上报标记 string
+mstatus 数据状态 0上报/6补缺 string
+estatus 设备状态 string
+astatus 数据报警状态：
+0:正常 1:超标 2:异常
+9:未设上下限
+string
+sstatus 设备停运状态 string
+rstatus 排放量计算标识:
+null：排放量未计算，1：
+string
+===== PAGE 17 =====
+17
+排放量计算未算出值，2：
+排放量计算算出值，3：排
+放量修约未算出值，4：排
+放量修约算出值
+rstatus_reaso
+n
+排放量未计算出原因 string
+cou_revised 修正排放量 string
+avg_revised 浓度修正值 string
+datasource_co
+de
+浓度计算标识
+null：浓度未计算，1：浓
+度计算未计算出值，4：浓
+度计算出值
+string
+datasource_re
+ason
+浓度未计算出原因 string
+msg 调用成功/调用失败 string
+2.1.9 火电水泥工况参数数据查询接口
+请求方式:POST
+请求数据类型:application/x-www-form-urlencoded
+请求参数:
+schema
+_ts 时间戳 query true string
+end_time 结束时间(yyyy-MM-dd HH:mm:ss),时间跨度不超过1小
+时
+query true string
+mpId 监控点id,可以传递授权企业下多个监控点id 以逗号
+(,)隔开,限制10个以内
+query true string
+sign 签名 query true string
+start_time 开始时间(yyyy-MM-dd HH:mm:ss),时间跨度不超过1小
+时
+query true string
+type 1根据data_time查询 2根据update_time查询 query true string
+method getAutoRealTimeWorkcordation query true string
+响应参数:
+schema
+code 200成功 500失败 string
+data 数据对象 array Mongodb
+Data
+created_time 创建时间 string
+===== PAGE 18 =====
+18
+data_time 监测时间 string
+id id string
+mp_id 监控点id string
+updated_time 更新时间 string
+values 数据 array Document
+pollutant_code 污染物编码 string
+rtd_value 监测值 string
+msg 调用成功/调用失败 string
+===== PAGE 19 =====
+19
+2.2 标记数据类接口
+2.2.1 通讯中断标记记录查询接口
+请求方式:POST
+请求数据类型:application/x-www-form-urlencoded
+请求参数:
+schema
+_ts 时间戳 query true string
+end_time 结束时间 (例：2022-06-23 00:00:00) query true string
+sign 签名 query true string
+start_time 开始时间 (例：2022-06-23 00:00:00) query true string
+type 1根据data_time查询 2根据update_time查询 query true string
+ps_id 企业 ID(只能传递一个授权企业的企业ID) query false string
+method getAutoCommunicationInterrupt query true string
+响应参数:
+schema
+code 200成功 500失败 string
+data 数据对象 array CommunicationInterrupt
+city 市 string
+cityCode 市地域码 string
+created_by 创建人 string
+created_time 创建时间 string
+cxsc 持续时长(h) string
+data_status 数据状态 1在用 -1删除 string
+end_time 结束时间 string
+id 编号 string
+mp_id 监控点ID string
+mp_name 监控点名称 string
+proof_id 凭证ID string
+province 省 string
+provinceCode 省地域码 string
+ps_id 企业ID string
+ps_name 企业名称 string
+reason 备注 string
+revise_flag 标记类型编码 string
+revise_flag_item 标记类型子项编码 string
+revise_flag_item_name 标记类型子项名称 string
+===== PAGE 20 =====
+20
+revise_flag_name 标记类型名称 string
+start_time 开始时间 string
+status 标记是否完成 1完成0未完成 string
+updated_by 修改人 string
+updated_time 修改时间 string
+msg 调用成功/调用失败 string
+2.2.2 自动监测设备维护标记(污染物)查询接口
+请求方式:POST
+请求数据类型:application/x-www-form-urlencoded
+请求参数:
+schema
+_ts 时间戳 query true string
+end_time 结束时间(例：2022-06-23 00:00:00) query true string
+sign 签名 query true string
+start_time 开始时间(例：2022-06-23 00:00:00) query true string
+type 1根据data_time查询 2根据update_time
+查询
+query true string
+ps_id 企业 ID(只能传递一个授权企业的企业ID) query false string
+method getAutoDataAnomalSign/list query true string
+响应参数:
+schema
+code 200成功 500失败 string
+data 数据对象 array DataAnomalSign
+city 市 string
+cityCode 市地域码 string
+created_by 创建人 string
+created_time 创建时间 string
+cxsc 持续时长(h) string
+data_status 数据状态 1正常 -1删除 string
+end_time 结束时间 string
+group_id 组ID string
+id id string
+mp_id 监控点编号 string
+mp_name 监控点名称 string
+poll_code 污染物编码 string
+poll_name 污染物名称 string
+===== PAGE 21 =====
+21
+proof_id 凭证ID string
+province 省 string
+provinceCode 省地域码 string
+ps_id 企业编号 string
+ps_name 企业名称 string
+remark 备注 string
+revise_flag 数据标记类型编码 string
+revise_flag_item 数据标记类型子项编码 string
+revise_flag_item_name 数据标记类型子项名称 string
+revise_flag_name 数据标记类型名称 string
+start_time 开始时间 string
+status 标记状态 0未完成 1 已完成 string
+updated_by 修改人 string
+updated_time 修改时间 string
+msg 调用成功/调用失败 string
+2.2.3 手工监测值录入查询接口
+请求方式:POST
+请求数据类型:application/x-www-form-urlencoded
+请求参数:
+schema
+_ts 时间戳 query true string
+end_time 结束时间(例：2022-06-23 00:00:00) query true string
+sign 签名 query true string
+start_time 开始时间(例：2022-06-23 00:00:00) query true string
+type 1根据data_time查询 2根据update_time查询 query true string
+ps_id 企业 ID(只能传递一个授权企业的企业ID) query false string
+method getAutoDataMonitor query true string
+响应参数:
+schema
+code 200成功 500失败 string
+data 数据对象 array DataMonitor
+avg_val 监测值 string
+avg_zs 折算值 string
+cl_equip 测量仪器 string
+cl_method 测量方法 string
+cl_unit 测量单位 string
+created_by 创建人 string
+created_time 创建时间 string
+===== PAGE 22 =====
+22
+data_status 数据状态 1在用 -1删除 string
+end_time 结束时间 string
+group_id 手工监测组ID string
+id id string
+monitor_type 手工监测类型（1 自行监测 2执法监测） string
+mp_id 监控点编号 string
+mp_name 监控点名称 string
+poll_code 污染物编码 string
+poll_name 污染物名称 string
+proof_id 凭证ID string
+ps_id 企业编号 string
+ps_name 企业名称 string
+reason 备注 string
+start_time 开始时间 string
+updated_by 修改人 string
+updated_time 修改时间 string
+msg 调用成功/调用失败 string
+2.2.4 非排污单位责任造成数据缺失无效信息
+请求方式:POST
+请求数据类型:application/x-www-form-urlencoded
+请求参数:
+schema
+_ts 时间戳 query true string
+end_time 结束时间(例：2022-06-23 00:00:00) query true string
+sign 签名 query true string
+start_time 开始时间(例：2022-06-23 00:00:00) query true string
+type 1根据data_time查询 2根据update_time查询 query true string
+ps_id 企业 ID(只能传递一个授权企业的企业ID) query false string
+method getAutoForceMajeureSign query true string
+响应参数:
+schema
+code 200成功 500失败 string
+data 数据对象 array ForceMajeureSign
+city 市 string
+cityCode 市编码 string
+created_by 创建人 string
+===== PAGE 23 =====
+23
+created_time 创建时间 string
+cxsc 持续时长（h） string
+data_status 数据状态 1在用 -1删除 string
+end_time 结束时间 string
+id 编号 string
+majeure_type 不可抗力标记类型 1 不可抗力，2 长期停运
+关闭自动监测设备，3 其他数据缺失或无效
+string
+mp_id 监控点id string
+mp_name 监控点名称 string
+proof_id 凭证id string
+province 省 string
+provinceCode 省编码 string
+ps_id 企业ID string
+ps_name 企业名称 string
+reason 备注 string
+revise_flag 标记类型编码 string
+revise_flag_item 标记类型子项编码 string
+revise_flag_item_name 标记类型子项名称 string
+revise_flag_name 标记类型名称 string
+start_time 开始时间 string
+status 标记是否完成 0未完成 1 已完成 string
+updated_by 修改人 string
+updated_time 修改时间 string
+msg 调用成功/调用失败 string
+2.2.5 自动监测设备维护标记(工况参数)查询接口
+请求方式:POST
+请求数据类型:application/x-www-form-urlencoded
+请求参数:
+schema
+_ts 时间戳 query true string
+end_time 结束时间(例：2022-06-23 00:00:00) query true string
+sign 签名 query true string
+start_time 开始时间(例：2022-06-23 00:00:00) query true string
+type 1根据data_time查询 2根据update_time查询 query true string
+ps_id 企业 ID(只能传递一个授权企业的企业ID) query false string
+method getAutoGkparamDataSign/list query true string
+响应参数:
+===== PAGE 24 =====
+24
+schema
+code 200成功 500失败 string
+data 数据对象 array GkparamDataSign
+city 市 string
+cityCode 市地域码 string
+created_by 创建人 string
+created_time 创建时间 string
+cxsc 持续时长(h) string
+data_status 数据状态 1在用 -1删除 string
+end_time 结束时间 string
+group_id 组ID string
+id id string
+indursty_code 重点行业类型编码 string
+indursty_name 重点行业类型名称 string
+poll_code 污染物编码 string
+poll_name 污染物名称 string
+proof_id 凭证ID string
+province 省 string
+provinceCode 省地域码 string
+ps_id 企业编号 string
+ps_name 企业名称 string
+remark 备注 string
+revise_flag 数据标记类型编码 string
+revise_flag_item 数据标记类型子项编码 string
+revise_flag_item_name 数据标记类型子项名称 string
+revise_flag_name 数据标记类型名称 string
+sc_id 生产设施编号 string
+sc_name 生产设施名称 string
+start_time 开始时间 string
+status 标记是否完成（0未完成 1完成） string
+updated_by 修改人 string
+updated_time 修改时间 string
+msg 调用成功/调用失败 string
+2.2.6 治理设施工况标记查询接口
+请求方式:POST
+请求数据类型:application/x-www-form-urlencoded
+请求参数:
+schema
+===== PAGE 25 =====
+25
+_ts 时间戳 query true string
+end_time 结束时间(例：2022-06-23 00:00:00) query true string
+sign 签名 query true string
+start_time 开始时间(例：2022-06-23 00:00:00) query true string
+type 1根据data_time查询 2根据update_time查询 query true string
+ps_id 企业 ID(只能传递一个授权企业的企业ID) query false string
+method getAutoGovernWorkcordationInfo query true string
+响应参数:
+schema
+code 200成功 500失败 string
+data 数据对象 array GovernWorkcordationInfo
+city 市 string
+cityCode 市地域码 string
+cordation_name 工况类型名称 string
+cordation_type 工况类型编号 string
+created_by 创建人 string
+created_time 创建时间 string
+data_status 数据状态 1在用 -1删除 string
+end_time 结束时间 string
+group_id 组ID string
+hours 持续时长 integer
+id id string
+marking_reason 工况标记原因 string
+marking_reasonType 工况标记原因分类 string
+marking_reasonId 工况标记Id string
+minutes 持续时长(m) integer
+mp_id 监控点id string
+mp_name 监控点名称 string
+order_number 排序编号 string
+province 省 string
+provinceCode 省地域码 string
+ps_id 污染源id string
+ps_name 污染源名称 string
+reason 备注 string
+start_time 开始时间 string
+status 工况是否完成（0未完成 1 完
+成）
+string
+updated_by 修改人 string
+updated_time 修改时间 string
+work_level 工况节点编号 string
+msg 调用成功/调用失败 string
+===== PAGE 26 =====
+26
+2.2.7 生产设施工况标记查询接口
+请求方式:POST
+请求数据类型:application/x-www-form-urlencoded
+请求参数:
+schema
+_ts 时间戳 query true string
+end_time 结束时间(例：2022-06-23 00:00:00) query true string
+sign 签名 query true string
+start_time 开始时间(例：2022-06-23 00:00:00) query true string
+type 1根据data_time查询 2根据update_time查
+询
+query true string
+ps_id 企业 ID(只能传递一个授权企业的企业ID) query false string
+method getAutoWorkcordationInfo query true string
+响应参数:
+schema
+code 200成功 500失败 string
+data 数据对象 array WorkcordationInfo
+city 市 string
+cityCode 市地域码 string
+cordation_name 工况类型名称 string
+cordation_type 工况类型编号 string
+created_by 创建人 string
+created_time 创建时间 string
+data_status 数据状态 1在用 -1删除 string
+end_time 结束时间 string
+group_id 组ID string
+hours 持续时长（h） integer
+id 编号 string
+indursty_code 重点行业编码 string
+indursty_name 重点行业名称 string
+marking_reason 工况标记原因 string
+marking_reasonId 工况标记Id string
+minutes 持续时长(m) integer
+mp_id 生产设施ID string
+mp_name 生产设施名称 string
+order_number 排序编号 string
+province 省 string
+===== PAGE 27 =====
+27
+provinceCode 省地域码 string
+ps_id 企业ID string
+ps_name 企业名称 string
+reason 备注 string
+start_time 开始时间 string
+status 工况是否完成 0未完成 1完成 string
+updated_by 修改人 string
+updated_time 修改时间 string
+work_level 工况节点编号 string
+msg 调用成功/调用失败 string
+2.2.8 CEMS主备切换查询接口
+请求方式:POST
+请求数据类型:application/x-www-form-urlencoded
+请求参数:
+schema
+_ts 时间戳 query true string
+end_time 结束时间(例：2022-06-23 00:00:00) query true string
+sign 签名 query true string
+start_time 开始时间(例：2022-06-23 00:00:00) query true string
+type 1根据data_time查询 2根据update_time查询 query true string
+ps_id 企业 ID(只能传递一个授权企业的企业ID) query false string
+method getCemsSwitch query true string
+响应参数:
+schema
+code 200成功 500失败 string
+data 数据对象 array CommunicationInterrupt
+city 市 string
+cityCode 市地域码 string
+created_by 创建人 string
+created_time 创建时间 string
+cxsc 持续时长(h) string
+data_status 数据状态 1在用 -1删除 string
+end_time 结束时间 string
+id 编号 string
+mp_id 监控点ID string
+mp_name 监控点名称 string
+province 省 string
+===== PAGE 28 =====
+28
+provinceCode 省地域码 string
+ps_id 企业ID string
+ps_name 企业名称 string
+reason 备注 string
+start_time 开始时间 string
+status 标记是否完成 1完成0未完成 string
+updated_by 修改人 string
+updated_time 修改时间 string
+msg 调用成功/调用失败 string
+===== PAGE 29 =====
+29
+2.3 基础信息类接口
+2.3.1 企业基本信息查询接口
+请求方式:POST
+请求数据类型:application/x-www-form-urlencoded
+请求参数:
+schema
+_ts 时间戳 query true string
+sign 签名 query true string
+ps_id 企业 ID(当为空或者不传递时,返回所有企
+业),当传递多个时以逗号(,)隔开,最多可以
+传递10个企业ID
+query false string
+regionCode 行政区划(当为空或者不传递时,返回所有企
+业,否则查询当前行政区及下级企业)
+query false string
+accessToken accessToken header true string
+method getAutoBaseInfo query true string
+响应参数:
+schema
+code 200成功 500失败 string
+data 数据对象 array EnterpriseBaseData
+address 单位地址 string
+area_code 区域编码 string
+area_name 区域名称 string
+buildStatus 建设状态 0:待建,1:在建,2:已建 string
+comment 备注 string
+companyType 单位类别 string
+corporation_name 法人 string
+credit_code 社会信用代码(法人代码) string
+email 邮箱 string
+enteroriseName 排污单位规模 string
+enteroriseSize 排污单位规模码 string
+environment_dept 企业环保部门 string
+environment_mans 环保人数 string
+environment_principal 环保负责人 string
+fax 传真 string
+id 污染源id string
+industryCode 行业类别码 string
+===== PAGE 30 =====
+30
+schema
+industryName 行业类别名称 string
+is_monitor 是否可监控 1是,0否 string
+is_paper 是否造纸厂 true是,false否 boolean
+is_power30w 是否30kw企业 1是,0否 string
+latitude 纬度 string
+link_man 联系人 string
+longitude 经度 string
+manufacture_date 投产日期 string
+mobile_phone 手机 string
+monitorStatus 国控状态（2012-2016为国控名单,2017-2022
+为重点排污单位）
+string
+monitorTypeName 排污单位名类类别 string
+office_phone 电话 string
+paper_zj_gm 年生产纸浆规模(万吨) string
+paper_zj_scx 制浆生产线(条) string
+paper_zz_gm 年生产造纸规模(万吨) string
+paper_zz_scx 造纸生产线(条) string
+postcode 邮政编码 string
+psClassCode 企业类别 1一般工业企业,4污水处理厂 string
+ps_name 污染源名称 string
+pwxkIndustryCode 排污许可行业码 string
+pwxkIndustryName 排污许可行业 string
+pwxk_bh 排污许可编号 string
+qysc_type 企业生产类型 string
+region_code 行政区划编码(所属环保机构) string
+region_name 行政区划名称(所属环保机构) string
+registCode 注册类型码 string
+registName 注册名称 string
+short_name 污染源简称 string
+subjectionCode 隶属关系码 string
+subjectionName 隶属关系 string
+uncontrolReanson 不可控原因 string
+valleyCode 流域编码 string
+valleyName 流域名称 string
+website 网站地址 string
+wscl_type 污水处理厂类型_是否为城镇污水集中处理设施
+1是,0否
+string
+wsclc_clnl 污水处理厂处理能力(单位：万吨/日) string
+wsclc_credit_code 污水处理厂运营单位社会信用代码 string
+wsclc_wslx 污水处理厂_污水类型 1:工业污水,2生活污水 string
+wsclc_yydw 污水处理厂运营单位 string
+===== PAGE 31 =====
+31
+schema
+jgIndustryName 监管行业 string
+msg 调用成功/调用失败 string
+2.3.2 数采仪信息查询接口
+请求方式:POST
+请求数据类型:application/x-www-form-urlencoded
+请求参数:
+schema
+_ts 时间戳 query true string
+sign 签名 query true string
+ps_id 企业 ID(当为空或者不传递时,返回所有企
+业),当传递多个时以逗号(,)隔开,最多可以
+传递10个企业ID
+query false string
+accessToken accessToken header true string
+method getAutoDgiInfo query true string
+响应参数:
+schema
+code 200成功 500失败 string
+data 数据对象 array Dgi
+agents 代理商 string
+analog_input_count 模拟量输入通道数量 string
+certification_number 环保产品认证编号 string
+communate_protocol 通讯协议 2022005:212协议-2005,2122017:212协议-2017 string
+communate_way 通讯方式 string
+contact 生产厂商联系人 string
+digital_input_count 数字输入通道数量 string
+digital_type 接收信号类型 1:模拟,2:数字,3:数字加模拟 string
+factory_number 设备出厂编号 string
+gather_unit 采集单元 string
+id 主键Id string
+ip1 上报IP1 string
+ip2 上报IP2 string
+ip3 上报IP3 string
+ip4 上报IP4 string
+license_number 生产许可证编号号 string
+maintenance_unit 运维单位 string
+===== PAGE 32 =====
+32
+schema
+manufacturer 生产商 string
+mn MN序列号 string
+mp_id 监控点Id string
+mp_name 监控点名称 string
+open_input_count 开关量输入通道数量 string
+phone 生产厂商联系电话 string
+port1 上报端口1 string
+port2 上报端口2 string
+port3 上报端口3 string
+port4 上报端口4 string
+ps_id 排污单位Id string
+ps_name 排污单位名称 string
+remark 备注 string
+start_date 启用日期 string
+storage_capacity 存储容量 string
+storage_unit 存储单位 1:KB,2:MB,3:GB,4:TB string
+transmit_type 数据传输方式 string
+version 设备型号 string
+msg 调用成功/调用失败 string
+2.3.3 设备验收记录查询接口
+请求方式:POST
+请求数据类型:application/x-www-form-urlencoded
+请求参数:
+schema
+_ts 时间戳 query true string
+sign 签名 query true string
+ps_id 企业 ID(当为空或者不传递时,返回所有企
+业),当传递多个时以逗号(,)隔开,最多可以
+传递10个企业ID
+query false string
+method getAutoEquipAcceptInfo query true string
+响应参数:
+schema
+code 200成功 500失败 string
+===== PAGE 33 =====
+33
+schema
+data 数据对象 array EquipAccept
+accept_date 验收日期 string
+accept_status 验收结果 0:未通过;1:通过; string
+accept_unit 验收单位 string
+accept_user 验收人 string
+comment 备注 string
+equip_name 设备名称 string
+id 验收记录编号 string
+mp_id 监控点id string
+mp_name 监控点名称 string
+ps_id 污染源id string
+ps_name 污染源名称 string
+msg 调用成功/调用失败 string
+2.3.4 监测仪器信息查询接口
+请求方式:POST
+请求数据类型:application/x-www-form-urlencoded
+请求参数:
+schema
+_ts 时间戳 query true string
+sign 签名 query true string
+ps_id 企业 ID(当为空或者不传递时,返回所有企
+业),当传递多个时以逗号(,)隔开,最多可以
+传递10个企业ID
+query false string
+accessToken accessToken header true string
+method getAutoMonitorEquipInfo query true string
+响应参数：
+schema
+code 200成功 500失败 string
+data 数据对象 array MonitorEquipData
+agents 代理商 string
+===== PAGE 34 =====
+34
+schema
+air_rate 空气过量系数 string
+area 烟道截面积(㎡) string
+certification_number 环保产品认证编号 string
+comment 备注 string
+contact 生产商联系人 string
+conversion_rate 转换系数 string
+curve_value 标准曲线参数 string
+equipMonitorItems 测量项目 array EquipMonitorItem
+limit 检出限 string
+max 最大量程 string
+min 最小量程 string
+monitorPrinciple 监测原理 string
+pollutionCode 监测项目 string
+range 量程 string
+equip_type 仪器类型(ture 流量计/false 在线分析仪) string
+factory_number 设备出厂编号 string
+flow 稀释气流量（仅稀释法） string
+heat_temperature 加热消解温度 string
+heat_time 加热消解时间 string
+id 仪器ID string
+k_vlaue 皮托管系数K值 string
+license_number 生产许可证编号 string
+maintance_unit 运维单位 string
+manufacturer 生产商 string
+montior_type 仪器型号 string
+mp_id 监控点ID string
+mp_name 监控点名称 string
+name 仪器名称 string
+no2_temperature NO2转换器温度(℃) string
+other_factor_situation 其他污染物情况明细 string
+phone 生产商联系电话 string
+ps_id 排污单位Id string
+ps_name 排污单位名称 string
+rate 稀释比(%)（仅稀释法） string
+reagent_concentration 试剂浓度 string
+reagent_indate 试剂有效期 string
+reagent_name 试剂名称 string
+sample_flow 样品气流量 string
+sample_stress 样品气压力(KPa) string
+===== PAGE 35 =====
+35
+2.3.5 监测项目信息查询接口
+请求方式:POST
+请求数据类型:application/x-www-form-urlencoded
+请求参数:
+schema
+_ts 时间戳 query true string
+sign 签名 query true string
+ps_id 企业 ID(当为空或者不传递时,返回所有企
+业),当传递多个时以逗号(,)隔开,最多可以
+传递10个企业ID
+query false string
+accessToken accessToken header true string
+method getAutoMonitorItemInfo query true string
+响应参数:
+schema
+code 200成功 500失败 string
+data 数据对象 array MonitorItemData
+cdpf_outlut_standard 超低排放标准 string
+exmax 异常最大值 string
+exmin 异常最小值 string
+id 监测项目Id string
+is_cdpf 是否超低排放 1是,0否 string
+list array PsinfoMonitoritemRecordVo
+apply_range 标准适用范围 string
+bzFrom 标准来源 string
+daily_avg_standard 日排放标准 string
+effective_time 执行时间 string
+industry_standard_code 行业标准码 string
+schema
+speed_rate 速度场系数 string
+split_color 气水分离气滤芯正常颜色 string
+split_temperature 气水分离器冷凝器温度℃ string
+start_date 启用时间 string
+stress 稀释气压力（仅稀释法）(KPa) string
+way 测量方法 string
+msg 调用成功/调用失败 string
+===== PAGE 36 =====
+36
+schema
+industry_standard_name 行业标准名 string
+name 标准名称 string
+outlut_standard 排放标准 string
+spell 标准编号 string
+standard_level_code 标准级别 1一级标准,2二级标
+准,3三级标准,4水污染物特别排
+放限值,5大气污染物特别排放限值
+string
+standard_type_code 标准类别 1 国家标准,2地方标
+准,3行业标准,xkbz999排污许可
+证
+string
+summer_begin_time 夏季开始时间 string
+winter_bengin_time 冬季开始时间 string
+winter_outout_standard 冬季排放标准 string
+year_limit 标准适用年限码 string
+year_limit_name 标准适用年限 string
+mp_id 监控点Id string
+mp_name 监控点名称 string
+pollutant_code 污染物编码 string
+pollutant_name 污染物名称 string
+pollutant_type 污染物类型 1水 2气 string
+ps_id 污染源Id string
+ps_name 污染源名称 string
+samcyc 采样周期 string
+stop_flow_limit 停运期间分钟排放量上限 string
+msg 调用成功/调用失败 string
+2.3.6 监控点信息查询接口
+请求方式:POST
+请求数据类型:application/x-www-form-urlencoded
+请求参数:
+schema
+_ts 时间戳 query true string
+sign 签名 query true string
+ps_id 企业 ID(当为空或者不传递时,返回所有企
+业),当传递多个时以逗号(,)隔开,最多可以
+传递10个企业ID
+query false string
+accessToken accessToken header true string
+===== PAGE 37 =====
+37
+schema
+method getAutoMonitorPointInfo query true string
+响应参数:
+schema
+code 200成功 500失败 string
+data 数据对象 array MonitorPointData
+clottingFlag 是否折算 true否,false是 string
+comment 备注 string
+conversionFactor 过量空气系数 string
+diameter 管径(cm) string
+distance 传输距离(m) string
+dqyl 当地大气压力(Pa) string
+higth 排气筒高度 (m) string
+id 监控点ID string
+incineratorFlag 是否生活垃圾焚烧或危废焚烧
+true 是,false否
+string
+indurstyCode 行业码 string
+indurstyName 行业名称 string
+isVocs 是否VOCS true是,false否 string
+length 测流段长度(m) string
+mn 数采仪MN号 string
+mp_name 监控点名称 string
+mp_type 监控点类型 4废水监控点5废气监控点6
+进水监控点
+string
+outletYq 基准含氧量(%) string
+outlet_id 排放口ID string
+pondType 堰槽类型 string
+position 位置 string
+processWay 预处理方式 string
+producePollutionProcess 产污工艺 string
+producePollutionProcessCode 产污工艺码 string
+ps_id 污染源id string
+qcxl VOCS去除效率(%) string
+samplingArea 采样位置排气筒截面积(㎡) string
+samplingType 采样方式 string
+surfaceWidth 水面宽度(m) string
+width 喉道宽度(m) string
+isEnd 是否末端监控点 boolean
+msg 调用成功/调用失败 string
+===== PAGE 38 =====
+38
+2.3.7 锅炉燃气轮机组信息
+请求方式:POST
+请求数据类型:application/x-www-form-urlencoded
+请求参数:
+schema
+_ts 时间戳 query true string
+sign 签名 query true string
+ps_id 企业 ID(当为空或者不传递时,返回所有企
+业),当传递多个时以逗号(,)隔开,最多可以
+传递10个企业ID
+query false string
+accessToken accessToken header true string
+method getAutoMpAirBoilerInfo query true string
+响应参数:
+schema
+code 200成功 500失败 string
+data 数据对象 array MpAirBoiler
+boiler_num 机组编号 string
+ed_gl 锅炉额定蒸发量(吨/小时)/燃气轮机发电机组功率(MW) string
+ed_zqwd 额定蒸汽温度(℃) string
+ed_zqyl 额定蒸汽压力(MPa) string
+id 编号 string
+jz_type 燃烧类型 string
+monitor_type 型号 string
+mpIdNames 对应末端点位 array string
+name 名称 string
+ps_id 污染源Id string
+pwxkBh 排污许可编号 string
+rszzLx 燃烧装置类型 string
+run_time 取得排污许可证时间 string
+sj_rxl 设计热效率(%) string
+yq_zxbz 烟气执行标准 string
+msg 调用成功/调用失败 string
+2.3.8 水泥窑信息查询接口
+请求方式:POST
+===== PAGE 39 =====
+39
+请求数据类型:application/x-www-form-urlencoded
+请求参数:
+schema
+_ts 时间戳 query true string
+sign 签名 query true string
+ps_id 企业 ID(当为空或者不传递时,返回所有企
+业),当传递多个时以逗号(,)隔开,最多可以
+传递10个企业ID
+query false string
+accessToken accessToken header true string
+method getAutoMpCementKilnInfo query true string
+响应参数:
+schema
+code 200成功 500失败 string
+data 数据对象 array MpCementKiln
+id 水泥窑编号 string
+name 水泥窑名称 string
+ps_id 污染源id string
+ps_name 污染源名称 string
+pwxkBh 排污许可证编号 string
+yt_is_close 窑头烟囱是否被封 1是0否 string
+yt_mp_id 窑头监控点id string
+yt_mp_name 窑头监控点名称 string
+yw_mp_id 窑尾监控点id string
+yw_mp_name 窑尾监控点名称 string
+msg 调用成功/调用失败 string
+2.3.9 排放口信息查询接口
+请求方式:POST
+请求数据类型:application/x-www-form-urlencoded
+请求参数:
+schema
+_ts 时间戳 query true string
+sign 签名 query true string
+ps_id 企业 ID(当为空或者不传递时,返回所有企
+业),当传递多个时以逗号(,)隔开,最多可以
+传递10个企业ID
+query false string
+===== PAGE 40 =====
+40
+schema
+accessToken accessToken header true string
+method getAutoOutlutInfo query true string
+响应参数:
+schema
+code 200成功 500失败 string
+data 数据对象 array OutletData
+acceptRange 集纳范围 string
+comment 备注 string
+diameter 出口内径(m) string
+exhaust_where 排放去向 string
+flag_install 标志牌安装形式 1平堤 2立堤 3平警 4立警 string
+flag_num 标志牌编号 string
+high 排放口高度(m) string
+id 排放口ID string
+isCemsSwitch 是否存在主备CEMS切换 true是,false否 string
+outlet_name 排放口名称 string
+outlet_rule_code 排放规律 1稳定连续排放 2周期性连续排放 3不规律连续排
+放 4有规律间断排放 5不规律间断排放 6其他
+string
+outlet_type 排放口类型 1废水排放口 2废气排放口3进水口 string
+position 位置 string
+ps_id 污染源id string
+pwxk_bh 排污许可证排放口编号 string
+is_oxy_fuel 是否富氧燃烧 true是,false否 string
+oxygen_content 助燃空气初始氧含量 string
+msg 调用成功/调用失败 string
+===== PAGE 41 =====
+41
+2.4 督办信息类接口
+2.4.1 查询企业对应时段督办明细
+请求方式:POST
+请求数据类型:application/x-www-form-urlencoded
+请求参数:
+schema
+_ts 时间戳 query true string
+accessToken accessToken header true string
+Edate 结束时间(例：2022-06-23 00:00:00) query true string
+region_code 行政区划(为0查全国) query true string
+Sdate 开始时间(例：2022-06-23 00:00:00) query true string
+sign 签名 query true string
+Ps_id 企业唯一id,若为空,返回全部 query false string
+is_check 核实状态（0-未核实、1-已核实、2-办理
+中）
+query false Integer
+is_feedback 反馈状态（0-未反馈、1-已反馈） query false Integer
+method supervise/list query true string
+响应参数:
+schema
+code 200成功 500失败 string
+data 数据对象 array SuperviseDocume
+nt
+deleteFlag 是否删除(-1删除/0正常) string
+import_type 督办级别,例如“事前预警”,“事中调度”,“事
+后督办”
+string
+industry_type 行业类型,“火电、水泥、造纸、其他” string
+monitorPointCode 监控点id string
+monitorPointName 监控点名称 string
+oneSuperviseItemName 一级事项名称 string
+psCode 企业编码 string
+psName 企业名称 string
+regionCode 所属行政区编码 string
+superviseId 督办id string
+supervise_content 督办内容 string
+supervise_num 督办单号 string
+supervise_send_time 督办单发送时间 string
+twoSuperviseItemName 二级事项名称 string
+itemId 督办类型编码 string
+===== PAGE 42 =====
+42
+superviseKeyTitle 督办单落款 string
+superviseFormTitle 督办单抬头 string
+superviseHeadline 督办单标题 string
+msg 调用成功/调用失败 string
+2.4.2 查询督办企业反馈处理情况
+请求方式:POST
+请求数据类型:application/x-www-form-urlencoded
+请求参数:
+schema
+_ts 时间戳 query true string
+accessToken accessToken header true string
+sign 签名 query true string
+superviseId 督办单id query true string
+method supervise/detail query true string
+响应参数:
+schema
+code 200成功 500失败 string
+data 数据对象 SuperviseDocumen
+tDetail
+SuperviseDocumentDetail
+dealInfo 督办拟立案信息 array SuperviseDeal
+createdTime 拟立案时间 string
+dealDescrib 处置描述 string
+illegalDescribe 情况说明 string
+isIllegal 是否违法行为 1是,
+0否
+string
+superviseDocumentId 督办单id string
+unit 单位 string
+userId 拟立案人id string
+userName 拟立案人姓名 string
+endCaseInfo 督办结案信息 array SuperviseEndCase
+endCaseDate 结案时间 string
+handOverName 移交对象 名称 string
+penalty 已交罚款 number
+envcheckInfo 环保局核实信息 array SuperviseEnvCheck
+checkDescribe 核实意见 string
+checkTime 核实时间 string
+===== PAGE 43 =====
+43
+isVerified 企业反馈是否属实1
+是，0否
+string
+superviseDocumentId 督办单id string
+supervision_is_true 督办事项反馈是否
+属实1是，0否
+string
+unit 单位 string
+userId 核实人id string
+userName 核实人姓名 string
+feedbackInfo 企业反馈信息 array SuperviseEnterpriseFeedbac
+k
+feedbackContent 反馈内容 string
+feedbackTime 反馈时间 string
+sourceType 反馈途径 1微信，2
+企业端
+integer
+superviseDocumentId 督办单id string
+punishInfo 事后督办处罚信息 array SuperviseEnvPunish
+amendDate 责令改正违法行为
+处罚时间
+string
+amendDescribe 责令改正违法行为
+描述
+string
+amendNumber 责令改正违法行为
+决定书文号
+string
+closeDate 责令停业、关闭处
+罚时间
+string
+closeDescribe 责令停业、关闭描
+述
+string
+closeNumber 责令停业、关闭决
+定书文号
+string
+isAmend 是否责令改正违法 string
+行为，1是
+isClose 是否责令停业、关
+闭，1是
+string
+isLimitation 是否责令限制生
+产，1是
+string
+isOther 是否其他处罚，1是 string
+isPenalty 是否罚款，1是 string
+isShutdown 是否责令停工整治
+或者停业整治，1是
+string
+isSuspend 是否停产整治，1是 string
+limitationDate 责令限制生产处罚
+时间
+string
+limitationDescribe 责令限制生产描述 string
+limitationNumber 责令限制生产决定
+书文号
+string
+noPunish 是否免于处罚，1是 string
+===== PAGE 44 =====
+44
+noPunishDescribe 免于处罚描述说明 string
+noPunishNumber 免于处罚文书号 string
+otherDate 其他处罚时间 string
+otherDescribe 其他处罚描述 string
+otherNumber 其他处罚决定书文号 string
+penaltyAmount 罚款处罚金额 string
+penaltyDate 罚款时间 string
+penaltyDescribe 罚款描述 string
+penaltyNumber 罚款决定书文号 string
+shutdownDate 停工整治或者停业整
+治处罚时间
+string
+shutdownDescribe 责令停工整治或者停
+业整治描述
+string
+shutdownNumber 责令停工整治或者停业
+整治决定书文号
+string
+suspendDate 停产整治处罚时间 string
+suspendDescribe 停产整治描述 string
+suspendNumber 停产整治决定书文
+号
+string
+unit 单位 string
+userId 核实人id string
+userName 核实人姓名 string
+startCaseInfo 督办立案信息 array SuperviseStartCase
+checkFile 是否上传现场核查笔
+录，1是，0否
+string
+recordFile 是否上传询问笔
+录，1是，0否
+string
+startCaseDate 立案时间 string
+startCaseFile 是否上传立案材
+料，1是，0否
+string
+takeEvidenceFile 是否上传取证材
+料，1是，0否取证
+材料
+string
+msg 调用成功/调用失败 string
+2.4.3 根据督办单ID查询督办明细
+请求方式:POST
+请求数据类型:application/json
+请求参数:
+===== PAGE 45 =====
+45
+_ts 时间戳 query true string
+sign 签名 query true string
+superviseId 督办单Id query true string
+itemId 督办类型编码 query true string
+method supervise/getSuperviseRecordList query true string
+响应参数:
+code 200成功 500失败 string
+data 数据对象 array BaseEntity
+pollutantCode 污染物编码 string
+pollutantName 污染物名称 string
+  dataName 指标类型 string
+  dataUnit 单位 string
+  lackNumber 缺失条数 Integer
+monitorTime 监测时间
+monitorValue 监测值 string
+standardValue 标准值 string
+overMultiples 超标倍数 string
+monitorPointName 监控点 string
+msg 调用成功/调用失败 string
+===== PAGE 46 =====
+46
+2.5 烟气废水汇总报表
+2.5.1 查询表头信息
+请求方式:POST
+请求数据类型:application/x-www-form-urlencoded
+请求参数:
+schema
+_ts 时间戳 query true string
+accessToken accessToken header true string
+mpType 监控点类型（1水、2气） query true string
+dateType 时间类型（0 日/1月/2季度/3年） query true string
+id 监控点 id(一次只能传一个监控点id) query true string
+sign 签名 query true string
+dateTime 查询时间段(开始时间,结束时间以
+逗号隔开,时间格式为yyyy-MM-dd
+HH:mm:ss)
+query true string
+industryType 行业(02水泥/04火电/05造纸/00简
+易/19垃圾焚烧)
+query true string
+method report/table-header/list query true string
+响应参数:
+schema
+code 200成功 500失败 string
+data 数据对象 array SuperviseDocument
+label 名称 string
+prop 列名 string
+show 是否显示 string
+width 列宽 string
+List children 下一级 string
+msg 调用成功/调用失败 string
+2.5.2 查询监控数据
+请求方式:POST
+请求数据类型:application/x-www-form-urlencoded
+请求参数:
+===== PAGE 47 =====
+47
+schema
+_ts 时间戳 query true string
+accessToken accessToken header true string
+mpType 监控点类型（1水、2气） query true string
+dateType 时间类型（0 日/1月/2季度/3年） query true string
+industryType 行业(02水泥/04火电/05造纸/00简
+易/19垃圾焚烧)
+query true string
+id 监控点 id(一次只能传一个监控点id) query true string
+props 要查询的字段（逗号隔开） query true string
+dateTime 查询时间段(开始时间,结束时间以
+逗号隔开,时间格式为yyyy-MM-dd
+HH:mm:ss)
+query true string
+sign 签名 query true string
+method report/data/list query true string
+注意：props 参数的示例：data_time,cou_value_B02（数据来源于“查询表头信息”接口，
+其中data_time属于必传项）
+响应参数:
+schema
+code 200成功 500失败 string
+data 数据对象 array SuperviseDocument
+rows 名称 string
+total 列名 string
+msg 调用成功/调用失败 string
+===== PAGE 48 =====
+48
+2.6 有效传输率接口
+注：传输率相关接口传入的时间参数必须在 ”获取传输有效率查询起止时间” 接口返回的时间
+范围内，并且传入时间不能跨年
+2.6.1 获取传输有效率查询起止时间
+请求方式:GET
+请求数据类型:*
+请求参数:
+schema
+_ts 时间戳 query true string
+accessToken accessToken header true string
+sign 签名 query true string
+method trans/begin-end-time query true string
+响应参数:
+schema
+code 200成功 500失败 string
+data 数据对象 object Map<string,string>
+beginTime 开始时间 string
+endTime 结束时间 string
+msg 调用成功/调用失败 string
+2.6.2 查询企业传输率
+请求方式:POST
+请求数据类型:application/x-www-form-urlencoded
+请求参数:
+schema
+ts 时间戳 query true string
+accessToken accessToken header true string
+end 结束时间(yyyy-MM-ddHH:mm:ss) query true string
+psId 企业id query true string
+sign 签名 query true string
+===== PAGE 49 =====
+49
+schema
+start 开始时间(yyyy-MM-ddHH:mm:ss) query true string
+method trans/getPsTransDetail query true string
+响应参数:
+schema
+code 200成功 500失败 string
+data 数据对象 TransPsinfo
+Detail TransPsinfoDetail
+city 市 string
+comple 补全 TransPsinfo TransPsinfo
+effeRate 有效率 number
+effeTransRate 有效传输率 number
+enumber 应收组数 integer
+dnumber 实报数 integer
+snumber 有效组数 integer
+exemptionsReason 豁免原因 string
+mnumber 应收个数 integer
+psId 企业id string
+psName 企业名称 string
+transRate 传输率 number
+type 类别(即时 or 补全) string
+updatedTime 更新时间 string
+isKao 是否考核(0非考核/1考核) integer
+permit 排污许可证编码 string
+province 省 string
+psName 企业名称 string
+realtime 实时 TransPsinfo TransPsinfo
+effeRate 有效率 number
+effeTransRate 有效传输率 number
+enumber 应收组数 integer
+dnumber 实报数 integer
+snumber 有效组数 integer
+exemptionsReason 豁免原因 string
+mnumber 应收个数 integer
+psId 企业id string
+psName 企业名称 string
+transRate 传输率 number
+type 类别(即时 or 补全) string
+updatedTime 更新时间 string
+regionName 行政区划名称 string
+socialCredit 组织机构编码 string
+transMpInfoList 监控点有效传输率列表 array TransMpinfoDetail
+===== PAGE 50 =====
+50
+schema
+comple 补全 TransMpinf
+o TransMpinfo
+effeRate 有效率 number
+effeTransRate 有效传输率 number
+enumber 应收组数 integer
+dnumber 实报数 integer
+snumber 有效组数 integer
+exemptionsReason 豁免原因 string
+mnumber 应收个数 integer
+transRate 传输率 number
+type 类别(即时 or 补全) string
+updatedTime 更新时间 string
+isKao 是否考核 integer
+mpId 监控点id string
+mpName 监控点名称 string
+mpType 监控点类型(1/水,2/气) string
+realtime 实时 TransMpinf
+o TransMpinfo
+effeRate 有效率 number
+effeTransRate 有效传输率 number
+enumber 应收组数 integer
+dnumber 实报数 integer
+snumber 有效组数 integer
+exemptionsReason 豁免原因 string
+mnumber 应收个数 integer
+transRate 传输率 number
+type 类别(即时 or 补全) string
+updatedTime 更新时间 string
+msg 调用成功/调用失败 string
+2.6.3 查询污染物有效传输率
+请求方式:POST
+请求数据类型:application/x-www-form-urlencoded
+请求参数:
+schema
+_ts 时间戳 query true string
+accessToken accessToken header true string
+end 结束时间(yyyy-MM-ddHH:mm:ss) query true string
+psId 企业id query true string
+===== PAGE 51 =====
+51
+schema
+sign 签名 query true string
+start 开始时间(yyyy-MM-ddHH:mm:ss) query true string
+mpId 监控点id query true string
+mpType 监控点类型(1/水,2/气) query true string
+method trans/getPollutantTransList query true string
+响应参数:
+schema
+code 200成功 500失败 string
+data 数据对象 TransPollut
+antDetail TransPollutantDetail
+comple 补全 TransPollut
+ant TransPollutant
+dnumber 实报数 integer
+enumber 应报数 integer
+effeRate 有效率 number
+effeTransRate 有效传输率 number
+exemptionsReason 豁免原因 string
+mnumber 应报组数 integer
+noTransReasons 无传输率原因 array string
+nosNum 不参与有效数据组数 integer
+snumber 有效组数 integer
+transRate 传输率 number
+type 即时 or 补全 integer
+invalidReasons 有效无效明细 array InvalidReasonEntity
+dataStatus 数据组状态：1有效，-1无效 string
+dataTime 数据时间 string
+invalidReason 原因 string
+updatedTime 更新时间 string
+isKao 是否考核 integer
+pollutantCode 污染物编码 string
+pollutantName 污染物名称 string
+realtime 实时 TransPollut
+ant TransPollutant
+dnumber 实报数 integer
+enumber 应报数 integer
+effeRate 有效率 number
+effeTransRate 有效传输率 number
+exemptionsReason 豁免原因 string
+mnumber 应报组数 integer
+noTransReasons 无传输率原因 array string
+nosNum 不参与有效数据组数 integer
+snumber 有效组数 integer
+transRate 传输率 number
+===== PAGE 52 =====
+52
+schema
+type 即时 or 补全 integer
+invalidReasons 有效无效明细 array InvalidReasonEntity
+dataStatus 数据组状态：1有效，-1无效 string
+dataTime 数据时间 string
+invalidReason 原因 string
+updatedTime 更新时间 string
+msg 调用成功/调用失败 string
+===== PAGE 53 =====
+53
+2.7 基数类数据接口
+2.7.1 参与联网统计排污单位信息接口
+请求方式:POST
+请求数据类型:application/x-www-form-urlencoded
+请求参数:
+schema
+_ts 时间戳 query true string
+region_code 行政区划 query false string
+sign 签名 query true string
+start_time 开始时间
+(yyyy-MM-dd
+HH:mm:ss)
+query true string
+end_time 结束时间
+(yyyy-MM-dd
+HH:mm:ss)
+query true string
+method getCheckMonitorI
+nfo
+query true string
+响应参数:
+schema
+code 200成功 500失败 string
+data 数据对象 array CheckMonitorItem
+begin_date 起始日期 string
+end_date 结束日期 string
+id id string
+mp_id 监控点id string
+mp_name 监控点名称 string
+outlet_standard 排放标准 string
+pollutant_code 污染物编码 string
+pollutant_name 污染物名称 string
+ps_entity_type_code 监控点类型(4水 5气 6进水) string
+ps_id 污染源id string
+ps_name 污染源名称 string
+region_code 行政区划 string
+year 考核年 string
+msg 调用成功/调用失败 string
+===== PAGE 54 =====
+54
+010-84756885/86

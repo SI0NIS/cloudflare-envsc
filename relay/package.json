@@ -1,0 +1,14 @@
+{
+  "name": "marks-relay",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "私有 HTTPS 中继：把企业端明文 HTTP 人工标记接口暴露为带鉴权的 HTTPS 端点，供 Cloudflare Worker 调用。",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
