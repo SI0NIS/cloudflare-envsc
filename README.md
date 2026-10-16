@@ -4,7 +4,7 @@
 
 企业污染源自动监测数据的**有效传输率**每天都会在公开平台发布，但**异常标记**（停运、人工填报、系统自动判定）散落在企业端平台的多个页面里，每天登录翻查非常繁琐。
 
-本项目把这个过程完全自动化：**每天定时核查有效传输率，一旦出现异常监控点或异常标记，立即推送（企业微信群机器人为主，Bark / 邮件兜底）**——不用登录任何平台，打开通知就知道当天哪些排口/机组出过什么事、发生在几点几分。
+本项目把这个过程完全自动化：**每天定时核查有效传输率，一旦出现异常监控点或异常标记，立即推送到手机（Bark / 邮件）**——不用登录任何平台，打开通知就知道当天哪些排口/机组出过什么事、发生在几点几分。
 
 ## 推送效果
 
@@ -32,9 +32,9 @@
 · 3号机组（工况标记：停运，不计入有效传输率统计时段）
 ```
 
-**④ 标记同步云函数 cookie 失效时，单独推送告警**（当天只告警一次），提醒更新会话。
+**④ 标记同步云函数 cookie 失效时，单独 Bark 告警**（当天只告警一次），提醒更新会话。
 
-推送通道（2026-10-16 起）：**企业微信群机器人为主**（群 Webhook，公网 HTTPS，云端可直发）；**Bark 兜底**（企微发送失败时自动回退）；**邮件为最后兜底**（Resend HTTP API，可选，不配置则前两级即可）。
+推送通道：**Bark 为主**（iOS 免费 App，公网 HTTPS）；**邮件兜底**（Resend HTTP API，Bark 失败时自动补发，不配置则只发 Bark）。
 
 ## 工作原理
 
@@ -61,8 +61,8 @@
             │                                               │
             │  KV 去重 ──► 数据就绪门控 ──► 判定 ──► 组装文案  │
             │                                    │          │
-            │                    企微群机器人（主）┤          │
-            │                  Bark / 邮件（兜底）┘          │
+            │                          Bark（主）┤          │
+            │                          邮件（兜底）┘          │
             └───────────────────────────────────────────────┘
 ```
 
@@ -73,7 +73,7 @@
 | **就绪门控** | 先调平台的 `begin-end-time` 接口确认 D-1 数据已发布；未发布返回 `not_ready`，顺延到下一整点重试 |
 | **KV 去重** | 推送成功才写去重键，当天 6 次触发只推一次；未推送/失败不写，下一整点自然重试 |
 | **标记多源融合** | 分钟级 KV 标记**按监测点覆盖**公开版小时级标记；来源会如实标注（`kv`/`public`/`kv+public`/`relay`），便于核对 |
-| **看门狗** | Worker 每天 13:05 后自检 KV 里是否有今天写入的标记——云函数欠费/冻结会静默失效，看门狗直接推企微机器人告警（Bark 兜底） |
+| **看门狗** | Worker 每天 13:05 后自检 KV 里是否有今天写入的标记——云函数欠费/冻结会静默失效，看门狗直接 Bark 告警 |
 
 **判定与文案规则**（`buildText`，回归测试 27 例覆盖）：
 
@@ -98,8 +98,6 @@ cloudflare-envsc/
 │   ├── kv-read.py          # 读取/检查 KV 内容
 │   ├── buildtext-test.mjs  # 推送文案回归测试（27 例）
 │   ├── merge-test.mjs      # 标记合并回归测试（28 例）
-│   ├── wecom-test.mjs      # 企微机器人推送（分片/容错）回归测试（10 例）
-│   ├── scf-wecom-test.mjs  # 云函数企微推送回归测试（5 例）
 │   ├── watchdog-test.mjs   # 看门狗回归测试
 │   └── dump-*.mjs          # 各数据接口裸抓诊断脚本
 ├── relay/                  # 企业端 HTTP → HTTPS 中继（fly.io/Render/Docker，带鉴权）
@@ -112,9 +110,8 @@ cloudflare-envsc/
 
 - Node.js ≥ 18（含 npm）；
 - 一个 Cloudflare 账号（免费版即可）；
-- 一个**企业微信账号**：在接收推送的目标群里添加「群机器人」，复制其 Webhook 地址（推送主通道，3 步即成）；
-- 可选：iOS 设备安装 [Bark](https://apps.apple.com/app/bark-customed-notifications/id1403753865)（兜底通道）；
-- 可选：[Resend](https://resend.com) 账号（邮件最后兜底）；
+- iOS 设备安装 [Bark](https://apps.apple.com/app/bark-customed-notifications/id1403753865)（推送通道）；
+- 可选：[Resend](https://resend.com) 账号（邮件兜底）；
 - 可选但推荐：阿里云函数计算 FC 或腾讯云 SCF 账号（分钟级标记抓取用，免费额度充足）；
 - 企业端平台的会话 cookie（用于抓取分钟级标记，向平台管理方申请账号后浏览器登录取得）。
 
@@ -129,8 +126,7 @@ npm install
 npx wrangler kv namespace create ENVSC_KV
 
 # 写入敏感凭据（交互式输入，不落盘不进仓库）
-npx wrangler secret put WECOM_WEBHOOK       # 企业微信群机器人 Webhook（主通道，必填）
-npx wrangler secret put BARK_KEY            # Bark 设备 key（兜底通道，可选）
+npx wrangler secret put BARK_KEY            # Bark 设备 key（必填）
 
 # 部署（同时注册 cron 定时器）
 npx wrangler deploy
@@ -150,14 +146,13 @@ FENV_CNEMC_COOKIE='jointframe.cluster.sessionid=xxx' \
 FENV_CF_ACCOUNT_ID=<Cloudflare 账号 ID> \
 FENV_CF_KV_NAMESPACE_ID=<第 1 步的 KV id> \
 FENV_CF_API_TOKEN=<有 KV 写权限的 API Token> \
-FENV_WECOM_WEBHOOK=<同第 1 步，企微机器人 Webhook> \
-FENV_BARK_KEY=<可选，与第 1 步一致> \
+FENV_BARK_KEY=<同第 1 步> \
 FENV_CNEMC_PSID=654000000031 FENV_DAYS=2 \
 python fc-deploy.py                          # 建/更新函数 + 定时触发器（12:55）
 python fc-deploy.py --invoke '{"dry":true}'  # 试跑一次（不写 KV）
 ```
 
-细节与踩坑记录见 [tools/deploy-aliyun-fc.md](tools/deploy-aliyun-fc.md)。云函数只做：定时 12:55 抓取 D-1/D-2 标记 → 写 Cloudflare KV（键 `marks:<YYYY-MM-DD>`）；cookie 失效时推企微机器人告警（Bark 兜底；KV 幂等，当天只告警一次）。
+细节与踩坑记录见 [tools/deploy-aliyun-fc.md](tools/deploy-aliyun-fc.md)。云函数只做：定时 12:55 抓取 D-1/D-2 标记 → 写 Cloudflare KV（键 `marks:<YYYY-MM-DD>`）；cookie 失效时 Bark 告警（KV 幂等，当天只告警一次）。
 
 ### 3.（可选）启用邮件兜底
 
@@ -166,7 +161,7 @@ npx wrangler secret put RESEND_API_KEY
 npx wrangler secret put MAIL_TO              # 收件邮箱
 ```
 
-不配置不影响企微机器人 / Bark 推送。
+不配置不影响 Bark 推送。
 
 ### 4.（可选）部署 HTTPS 中继
 
@@ -183,7 +178,6 @@ npx wrangler secret put MARKS_PROXY_TOKEN    # 与中继的 RELAY_TOKEN 一致
 
 ```bash
 curl https://envsc.<你的子域>.workers.dev    # 手动触发一次，直接看 JSON 结果
-curl "https://envsc.<你的子域>.workers.dev/test-wecom?k=<BARK_KEY>"   # 只发一条企微测试消息，不碰业务数据（需已配置 BARK_KEY 作鉴权口令）
 npx wrangler tail                            # 观察定时执行的实时日志
 ```
 
@@ -209,15 +203,14 @@ npx wrangler tail                            # 观察定时执行的实时日志
 
 | 变量 | 必填 | 说明 |
 |---|---|---|
-| `WECOM_WEBHOOK` | ✅ | 企业微信群机器人 Webhook（主推送通道） |
-| `BARK_KEY` | — | Bark 设备 key（企微失败时的兜底） |
+| `BARK_KEY` | ✅ | Bark 设备 key |
 | `MAIL_TO` | — | 邮件兜底收件地址 |
 | `RESEND_API_KEY` | — | 邮件兜底发件 API |
 | `CNEMC_COOKIE` | — | 企业端会话 cookie（中继模式 / 直连兜底时用） |
 | `MARKS_PROXY_URL` | — | 中继地址（可选） |
 | `MARKS_PROXY_TOKEN` | — | 中继鉴权令牌（须与中继 `RELAY_TOKEN` 一致） |
 
-**云函数环境变量**（`FENV_*` 传给 `fc-deploy.py`）：`CNEMC_COOKIE`、`CF_ACCOUNT_ID`、`CF_KV_NAMESPACE_ID`、`CF_API_TOKEN`、`WECOM_WEBHOOK`、`BARK_KEY`、`CNEMC_PSID`、`DAYS`（回抓天数，默认 2）。
+**云函数环境变量**（`FENV_*` 传给 `fc-deploy.py`）：`CNEMC_COOKIE`、`CF_ACCOUNT_ID`、`CF_KV_NAMESPACE_ID`、`CF_API_TOKEN`、`BARK_KEY`、`CNEMC_PSID`、`DAYS`（回抓天数，默认 2）。
 
 ## 定时与去重
 
@@ -234,14 +227,12 @@ npm run dev                        # 本地起 Worker（wrangler dev）
 node tools/buildtext-test.mjs      # 推送文案规则 27 例
 node tools/merge-test.mjs          # 标记合并规则 28 例
 node tools/watchdog-test.mjs       # 看门狗逻辑
-node tools/wecom-test.mjs          # 企微推送分片/容错 10 例
-node tools/scf-wecom-test.mjs      # 云函数企微推送 5 例
 ```
 
 运维常用：
 
 ```bash
-node tools/push-now.mjs 2026-10-07      # 用 KV 快照补推/预览某天（WECOM_WEBHOOK=xxx BARK_KEY=xxx KV_FILE=... 前缀）
+node tools/push-now.mjs 2026-10-07      # 用 KV 快照补推/预览某天（BARK_KEY=xxx KV_FILE=... 前缀）
 "C:/.../python.exe" tools/kv-read.py --list "marks:2026-10"   # 查看 KV 键（凭据自动加载）
 node tools/dump-puball.mjs              # 裸抓公开平台各接口，诊断数据源
 ```

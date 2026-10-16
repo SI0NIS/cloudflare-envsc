@@ -4,7 +4,7 @@
 
 The **effective transmission rate** of enterprise pollution-source automatic monitoring data is published daily on the public platform, but the **anomaly marks** (shutdowns, manually filed reports, system-auto-detected outages) are scattered across several pages of the enterprise-side platform — logging in and checking them every day is tedious.
 
-This project fully automates that routine: **it checks the transmission rate on schedule every day, and the moment any abnormal monitoring point or anomaly mark shows up, it pushes a notification (WeCom group bot as primary, Bark / email as fallback)** — no need to log in to any platform; the notification alone tells you which stack/outlet had an issue, what kind, and at exactly what time.
+This project fully automates that routine: **it checks the transmission rate on schedule every day, and the moment any abnormal monitoring point or anomaly mark shows up, it pushes straight to your phone (Bark / email)** — no need to log in to any platform; the notification alone tells you which stack/outlet had an issue, what kind, and at exactly what time.
 
 ## Push Examples
 
@@ -35,9 +35,9 @@ This project fully automates that routine: **it checks the transmission rate on 
 ```
 *("Unit 3 — operating-condition mark: shutdown, excluded from transmission-rate statistics")*
 
-**④ When the mark-sync function's cookie expires, a separate alert fires** (at most once per day) to remind you to refresh the session.
+**④ When the mark-sync function's cookie expires, a separate Bark alert fires** (at most once per day) to remind you to refresh the session.
 
-Push channels (since 2026-10-16): **WeCom group bot as primary** (group webhook over public HTTPS, cloud-sendable); **Bark as fallback** (auto-failover when the WeCom send fails); **email as last resort** (Resend HTTP API, optional).
+Push channels: **Bark as primary** (free iOS app over public HTTPS); **email as fallback** (Resend HTTP API, auto-sent when Bark fails; optional — without it only Bark is used).
 
 ## How It Works
 
@@ -66,8 +66,8 @@ Push channels (since 2026-10-16): **WeCom group bot as primary** (group webhook 
             │                                               │
             │  KV dedup ─► readiness gate ─► judge ─► text  │
             │                                     │         │
-            │                  WeCom bot (main) ─┤         │
-            │                  Bark / email (fb) ─┘         │
+            │                        Bark (main) ─┤         │
+            │                        Email (fb) ──┘         │
             └───────────────────────────────────────────────┘
 ```
 
@@ -78,7 +78,7 @@ Core mechanisms:
 | **Readiness gate** | Queries the platform's `begin-end-time` API first to confirm D-1 data is published; otherwise returns `not_ready` and defers to the next hourly run |
 | **KV dedup** | Writes the dedup key only after a successful push, so the 6 daily runs result in exactly one push; failures don't write the key, so the next hour naturally retries |
 | **Multi-source mark merging** | Minute-level KV marks **override** hour-level public marks per monitoring point; the source is truthfully recorded (`kv`/`public`/`kv+public`/`relay`) for easy auditing |
-| **Watchdog** | After 13:05 CST the Worker self-checks whether today's marks landed in KV — an arrears-frozen cloud function fails silently, and the watchdog raises a WeCom alert (Bark as fallback) |
+| **Watchdog** | After 13:05 CST the Worker self-checks whether today's marks landed in KV — an arrears-frozen cloud function fails silently, and the watchdog raises a Bark alert |
 
 **Judging & message rules** (`buildText`, covered by 27 regression tests):
 
@@ -103,8 +103,6 @@ cloudflare-envsc/
 │   ├── kv-read.py          # Read/inspect KV contents
 │   ├── buildtext-test.mjs  # Message-format regression tests (27 cases)
 │   ├── merge-test.mjs      # Mark-merging regression tests (28 cases)
-│   ├── wecom-test.mjs      # WeCom push (chunking/error) regression tests (10 cases)
-│   ├── scf-wecom-test.mjs  # Cloud-function WeCom push regression tests (5 cases)
 │   ├── watchdog-test.mjs   # Watchdog regression tests
 │   └── dump-*.mjs          # Raw-API diagnostic scripts for each data source
 ├── relay/                  # Enterprise HTTP → HTTPS relay (fly.io/Render/Docker, authenticated)
@@ -117,8 +115,7 @@ cloudflare-envsc/
 
 - Node.js ≥ 18 (with npm);
 - A Cloudflare account (free tier is enough);
-- A **WeCom (企业微信) account**: add a group bot in your target group and copy its webhook URL (primary push channel, ~30 seconds);
-- Optional: [Bark](https://apps.apple.com/app/bark-customed-notifications/id1403753865) installed on an iOS device (fallback channel);
+- [Bark](https://apps.apple.com/app/bark-customed-notifications/id1403753865) installed on an iOS device (push channel);
 - Optional: a [Resend](https://resend.com) account (email fallback);
 - Optional but recommended: an Alibaba Cloud Function Compute (FC) or Tencent Cloud SCF account for minute-level mark scraping (generous free tiers);
 - A session cookie for the enterprise platform (obtained by logging in via browser with an account granted by the platform operator; used to scrape minute-level marks).
@@ -135,8 +132,7 @@ npm install
 npx wrangler kv namespace create ENVSC_KV
 
 # Store secrets (interactive input; never written to disk or the repo)
-npx wrangler secret put WECOM_WEBHOOK       # WeCom group-bot webhook (primary, required)
-npx wrangler secret put BARK_KEY            # Bark device key (fallback, optional)
+npx wrangler secret put BARK_KEY            # Bark device key (required)
 
 # Deploy (also registers the cron trigger)
 npx wrangler deploy
@@ -156,14 +152,13 @@ FENV_CNEMC_COOKIE='jointframe.cluster.sessionid=xxx' \
 FENV_CF_ACCOUNT_ID=<Cloudflare account ID> \
 FENV_CF_KV_NAMESPACE_ID=<KV id from step 1> \
 FENV_CF_API_TOKEN=<API token with KV write permission> \
-FENV_WECOM_WEBHOOK=<same as step 1, WeCom webhook> \
-FENV_BARK_KEY=<optional, same as step 1> \
+FENV_BARK_KEY=<same as step 1> \
 FENV_CNEMC_PSID=654000000031 FENV_DAYS=2 \
 python fc-deploy.py                          # create/update the function + 12:55 trigger
 python fc-deploy.py --invoke '{"dry":true}'  # dry run (doesn't write KV)
 ```
 
-See [tools/deploy-aliyun-fc.md](tools/deploy-aliyun-fc.md) for details and pitfalls. The function does one thing: at 12:55 daily it scrapes D-1/D-2 marks and writes them to Cloudflare KV (keys `marks:<YYYY-MM-DD>`); on cookie expiry it raises a WeCom alert (Bark as fallback; KV-idempotent, at most once per day).
+See [tools/deploy-aliyun-fc.md](tools/deploy-aliyun-fc.md) for details and pitfalls. The function does one thing: at 12:55 daily it scrapes D-1/D-2 marks and writes them to Cloudflare KV (keys `marks:<YYYY-MM-DD>`); on cookie expiry it raises a Bark alert (KV-idempotent, at most once per day).
 
 ### 3. (Optional) Enable the email fallback
 
@@ -172,7 +167,7 @@ npx wrangler secret put RESEND_API_KEY
 npx wrangler secret put MAIL_TO              # recipient address
 ```
 
-Without these, the WeCom bot / Bark push still works normally.
+Without these, Bark still works normally.
 
 ### 4. (Optional) Deploy the HTTPS relay
 
@@ -214,15 +209,14 @@ Meaning of the returned `action`:
 
 | Variable | Required | Description |
 |---|---|---|
-| `WECOM_WEBHOOK` | ✅ | WeCom group-bot webhook (primary push channel) |
-| `BARK_KEY` | — | Bark device key (fallback when WeCom fails) |
+| `BARK_KEY` | ✅ | Bark device key |
 | `MAIL_TO` | — | Email-fallback recipient |
 | `RESEND_API_KEY` | — | Email-fallback sending API |
 | `CNEMC_COOKIE` | — | Enterprise session cookie (relay mode / direct fallback) |
 | `MARKS_PROXY_URL` | — | Relay URL (optional) |
 | `MARKS_PROXY_TOKEN` | — | Relay auth token (must equal the relay's `RELAY_TOKEN`) |
 
-**Cloud-function environment variables** (passed to `fc-deploy.py` as `FENV_*`): `CNEMC_COOKIE`, `CF_ACCOUNT_ID`, `CF_KV_NAMESPACE_ID`, `CF_API_TOKEN`, `WECOM_WEBHOOK`, `BARK_KEY`, `CNEMC_PSID`, `DAYS` (look-back days, default 2).
+**Cloud-function environment variables** (passed to `fc-deploy.py` as `FENV_*`): `CNEMC_COOKIE`, `CF_ACCOUNT_ID`, `CF_KV_NAMESPACE_ID`, `CF_API_TOKEN`, `BARK_KEY`, `CNEMC_PSID`, `DAYS` (look-back days, default 2).
 
 ## Schedule & Dedup
 
@@ -239,8 +233,6 @@ npm run dev                        # run the Worker locally (wrangler dev)
 node tools/buildtext-test.mjs      # message-format rules, 27 cases
 node tools/merge-test.mjs          # mark-merging rules, 28 cases
 node tools/watchdog-test.mjs       # watchdog logic
-node tools/wecom-test.mjs          # WeCom push chunking/tolerance, 10 cases
-node tools/scf-wecom-test.mjs      # cloud-function WeCom push, 5 cases
 ```
 
 Common operations:

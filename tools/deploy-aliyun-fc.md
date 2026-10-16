@@ -16,7 +16,6 @@ export ALIBABA_CLOUD_ACCESS_KEY_SECRET=...
 export ALIYUN_ACCOUNT_ID=1355617125073513        # FC 3.0 接入地址必须带 UID
 FENV_CNEMC_COOKIE='jointframe.cluster.sessionid=xxx' \
 FENV_CF_ACCOUNT_ID=... FENV_CF_KV_NAMESPACE_ID=... FENV_CF_API_TOKEN=... \
-FENV_WECOM_WEBHOOK='https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx' \
 FENV_BARK_KEY=... FENV_CNEMC_PSID=654000000031 FENV_DAYS=2 \
 python fc-deploy.py                               # 建/更新函数 + 建定时触发器
 python fc-deploy.py --invoke '{"dry":true}'       # 试跑（不写 KV），看抓取日志
@@ -53,12 +52,11 @@ python fc-deploy.py --invoke '{"dry":true}'       # 试跑（不写 KV），看�
 
 | 变量 | 值 |
 |---|---|
-| `CNEMC_COOKIE` | `jointframe.cluster.sessionid=xxxx`（企业端会话，**会过期**，失效时企微机器人会告警） |
+| `CNEMC_COOKIE` | `jointframe.cluster.sessionid=xxxx`（企业端会话，**会过期**，失效时 Bark 会告警） |
 | `CF_ACCOUNT_ID` | `df42e87e7315eea710e3b9e21a954619` |
 | `CF_KV_NAMESPACE_ID` | `2f5ad113e1d24eb6b76ce6a95d3dc804` |
 | `CF_API_TOKEN` | Cloudflare API Token（需 KV 的读写权限） |
-| `WECOM_WEBHOOK` | 企业微信群机器人 Webhook（主告警通道，2026-10-16 起） |
-| `BARK_KEY` | Bark 设备 key（兜底通道；敏感，不入库） |
+| `BARK_KEY` | Bark 设备 key（敏感，不入库） |
 | `CNEMC_PSID` | `654000000031` |
 | `DAYS` | `2`（同步昨天和前天两天） |
 | `ACCESS_TOKEN` | 可选；只有想加 HTTP 触发器（手机随手触发）时才需要，自己起一个随机串 |
@@ -111,5 +109,5 @@ body: {"date":"2026-09-26"}
 
 ## 维护提醒
 
-cookie 会过期（企业端会话），过期时当天会收到一条企微机器人告警"envsc 同步告警：cookie 已失效"（Bark 兜底），
+cookie 会过期（企业端会话），过期时当天会收到一条 Bark 告警"envsc 同步告警：cookie 已失效"，
 此时需要重新登录企业端抓 cookie，更新到环境变量 `CNEMC_COOKIE`。登录有滑块验证，代码里不做自动登录。

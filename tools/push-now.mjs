@@ -3,19 +3,17 @@
  * push-now.mjs —— 手动推送某一天（当 Worker 的触发通道不可用时使用）
  *
  * 与 envsc Worker 的推送逻辑一致：公开平台取率 + KV 取标记（公开铺底、KV 覆盖），
- * 复用 Worker 导出的 buildText 生成正文，然后推送：
- *   主通道 = 企业微信群机器人（设置 WECOM_WEBHOOK）；失败/未配置 → 兜底 Bark（设置 BARK_KEY）。
+ * 复用 Worker 导出的 buildText 生成正文，然后直接发 Bark。
  *
  * 用法：
  *   node tools/push-now.mjs 2026-09-22
  * 环境变量：
- *   WECOM_WEBHOOK           企微群机器人 Webhook（主通道）
- *   BARK_KEY                兜底（与 Worker 同一个 key）
+ *   BARK_KEY                必填（与 Worker 同一个 key）
  *   KV_FILE                 本地保存的 marks:<date> JSON（本机连不上 CF 时用）
  *   CF_ACC / CF_NS / CF_TOK 有则直接从 Cloudflare KV 读
  */
 import { readFileSync } from 'node:fs';
-import { buildText, pushWecom } from '../src/index.js';
+import { buildText } from '../src/index.js';
 
 const API = 'https://jkzx.envsc.cn/transpublic-v2';
 const PSID = '654000000031';
@@ -79,26 +77,14 @@ console.log(`date=${DAY}  unitRate=${unitRate}%  marks.source=${source}  KV点=$
 console.log('标题: ' + title);
 console.log('正文:\n' + (body || '（全部达标，正文为空）'));
 
-// 5) 推送（主通道：企微机器人；兜底：Bark；口径与 Worker 一致：全达标仅推标题）
+// 5) 发 Bark（全达标且正文为空 → 仅推标题，不带正文，与 Worker 口径一致）
+const KEY = process.env.BARK_KEY;
+if (!KEY) { console.log('\n[未推送] 未提供 BARK_KEY'); process.exit(0); }
 const fullOk = !body || !body.trim();
-const pushBody = fullOk ? '' : body;
-let pushed = false;
-if (process.env.WECOM_WEBHOOK) {
-  const w = await pushWecom({ WECOM_WEBHOOK: process.env.WECOM_WEBHOOK }, title, pushBody);
-  console.log('\n[WeCom] ' + JSON.stringify(w));
-  pushed = !!w.ok;
-} else {
-  console.log('\n[WeCom] 未设置 WECOM_WEBHOOK，跳过');
-}
-if (!pushed && process.env.BARK_KEY) {
-  const level = fullOk ? 'active' : 'timeSensitive';
-  const r = await fetch(`https://api.day.app/${process.env.BARK_KEY}`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ title, body: pushBody, level, group: '有效传输率' }),
-  });
-  const t = await r.text();
-  console.log('[Bark] HTTP ' + r.status + ' ' + t.slice(0, 200));
-} else if (!pushed) {
-  console.log('[提示] 主通道失败且未提供 BARK_KEY，未推送');
-  process.exit(2);
-}
+const level = fullOk ? 'active' : 'timeSensitive';
+const r = await fetch(`https://api.day.app/${KEY}`, {
+  method: 'POST', headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ title, body: fullOk ? '' : body, level, group: '有效传输率' }),
+});
+const t = await r.text();
+console.log('\n[Bark] HTTP ' + r.status + ' ' + t.slice(0, 200));
