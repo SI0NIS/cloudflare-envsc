@@ -29,7 +29,7 @@
  *   - 企业端 116.178.28.170:3080 只对国内 IP 开放（且只开 3080 端口）→ 抓取必须在境内；
  *   - 只用定时触发器 + 出网 HTTPS，不需要公网入口（不涉及 API 网关费用）；
  *     可选加 HTTP 触发器实现手机随手触发（见文件末尾 exports.handler，需配 ACCESS_TOKEN）；
- *   - cookie 失效 → 直接 Bark 告警（KV 幂等，当天只推一次）；登录有滑块验证故不做自动登录。
+ *   - cookie 失效 → 企业微信群机器人告警（Bark 兜底；KV 幂等，当天只推一次）；登录有滑块验证故不做自动登录。
  *
  * 运行时：Node.js 18（内置 global fetch）
  * 触发：定时触发器（北京时间 12:55，跑在 Worker 13:00 推送前）
@@ -39,7 +39,8 @@
  * 环境变量：
  *   CNEMC_COOKIE        企业端会话 cookie（jointframe.cluster.sessionid=xxxx）
  *   CF_ACCOUNT_ID / CF_KV_NAMESPACE_ID / CF_API_TOKEN   Cloudflare KV 写入凭据
- *   BARK_KEY            Bark key（失效告警；不配则只记日志）
+ *   WECOM_WEBHOOK       企业微信群机器人 Webhook（主通道，2026-10-16 起；失效告警优先走它）
+ *   BARK_KEY            Bark key（企微失败时的兜底；不配则只记日志）
  *   CNEMC_PSID（默认 654000000031）/ DAYS（默认 2）/ INDUSTRY_TYPE（默认 '00'）
  *
  * 测试：{} 正常跑；{"dry":true} 只抓不写；{"silent":true} 抑制告警；{"cookie":"x"} 模拟失效。
@@ -71,7 +72,7 @@ async function putKV(acc, ns, token, key, value, ttl) {
   return t;
 }
 
-// ---------- Bark 告警 ----------
+// ---------- Bark 告警（兜底通道） ----------
 async function pushBark(key, title, body) {
   if (!key) return { ok: false, error: 'no BARK_KEY' };
   try {
@@ -82,6 +83,26 @@ async function pushBark(key, title, body) {
     const t = await r.text();
     let j = {}; try { j = JSON.parse(t); } catch { j = { raw: t.slice(0, 120) }; }
     return { ok: j.code === 200, resp: j };
+  } catch (e) { return { ok: false, error: String(e.message || e) }; }
+}
+
+// ---------- 企业微信群机器人（主通道，2026-10-16 起） ----------
+async function pushWecom(url, title, body) {
+  if (!url) return { ok: false, error: 'no WECOM_WEBHOOK' };
+  // 企微 text 上限 2048 字节；告警文本很短，这里只做保险截断
+  let content = body ? `${title}\n${body}` : title;
+  if (Buffer.byteLength(content, 'utf8') > 1900) {
+    while (content.length > 1 && Buffer.byteLength(content, 'utf8') > 1860) content = content.slice(0, -1);
+    content += '…';
+  }
+  try {
+    const r = await fetch(url, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ msgtype: 'text', text: { content } }),
+    });
+    const t = await r.text();
+    let j = {}; try { j = JSON.parse(t); } catch { j = { raw: t.slice(0, 120) }; }
+    return { ok: r.status === 200 && j.errcode === 0, resp: j };
   } catch (e) { return { ok: false, error: String(e.message || e) }; }
 }
 
@@ -420,7 +441,7 @@ function payloadEvent(raw) {
 
 // ---------- 主入口 ----------
 // 导出内部函数供单测使用（不改变云端行为）
-exports._test = { mergeContinuous, mergeSameLabelSegs, extractWindows, windowText, segsText, FACTOR_NAMES, MP_FACTOR_NAMES, PARAM_CODE, qyText, factorNameOf, factorMapOf };
+exports._test = { mergeContinuous, mergeSameLabelSegs, extractWindows, windowText, segsText, FACTOR_NAMES, MP_FACTOR_NAMES, PARAM_CODE, qyText, factorNameOf, factorMapOf, pushWecom };
 
 exports.main_handler = async (event, context) => {
   const ev = event || {};
@@ -429,10 +450,18 @@ exports.main_handler = async (event, context) => {
   const industry = envOf(ev, 'industry', process.env.INDUSTRY_TYPE || '00');
   const days = Math.max(1, parseInt(envOf(ev, 'days', process.env.DAYS || '2'), 10) || 2);
   const dry = !!ev.dry, silent = !!ev.silent;
-  const acc = process.env.CF_ACCOUNT_ID, ns = process.env.CF_KV_NAMESPACE_ID, token = process.env.CF_API_TOKEN, bark = process.env.BARK_KEY;
+  const acc = process.env.CF_ACCOUNT_ID, ns = process.env.CF_KV_NAMESPACE_ID, token = process.env.CF_API_TOKEN,
+        wecom = process.env.WECOM_WEBHOOK, bark = process.env.BARK_KEY;
 
   const log = []; const say = (s) => { console.log(s); log.push(s); };
   const date0 = ev.date || ymd(new Date(Date.now() - 86400000));
+
+  // 企微通道自测：{"test":"wecom"} 只发一条测试消息（不抓数据、不写 KV、不占告警幂等）
+  if (ev.test === 'wecom') {
+    const w = await pushWecom(wecom, 'envsc 企微通道测试', `腾讯云 SCF → 企业微信群机器人 链路连通正常（${new Date().toISOString().slice(0, 19)}Z）。此消息为测试，可忽略。`);
+    say(`TEST_WECOM ${JSON.stringify(w)}`);
+    return { ok: w.ok, test: 'wecom', resp: w, log };
+  }
 
   const canKV = !!(acc && ns && token);
   const alertKey = `cookieAlert:${date0}`;
@@ -440,10 +469,15 @@ exports.main_handler = async (event, context) => {
     say(`ALERT ${title} | ${body}`);
     if (silent) { say('[silent] 已抑制推送'); return 'silent'; }
     if (canKV) { try { if (await getKV(acc, ns, token, alertKey)) { say('[dedup] 当天已告警过，跳过推送'); return 'dedup'; } } catch { /* ignore */ } }
-    const r = await pushBark(bark, title, body);
-    say(`Bark push: ${JSON.stringify(r)}`);
+    const w = await pushWecom(wecom, title, body);  // 主通道：企业微信群机器人
+    say(`WeCom push: ${JSON.stringify(w)}`);
+    let b = null;
+    if (!w.ok) {                                    // 兜底：Bark
+      b = await pushBark(bark, title, body);
+      say(`Bark push: ${JSON.stringify(b)}`);
+    }
     if (canKV) { try { await putKV(acc, ns, token, alertKey, new Date().toISOString(), 86400); } catch { /* ignore */ } }
-    return r;
+    return { wecom: w, bark: b };
   };
 
   // ---------- 维护动作（手动运维用，不依赖企业端 cookie） ----------

@@ -19,8 +19,10 @@
  *   CNEMC_COOKIE   企业端会话 cookie（secret）：jointframe.cluster.sessionid=xxx
  *   MARKS_PROXY_URL   自建 HTTPS 中继地址（secret/var），如 https://marks-relay-xxx.fly.dev
  *   MARKS_PROXY_TOKEN 中继鉴权令牌（secret），须与中继的 RELAY_TOKEN 一致
- *   BARK_KEY       Bark key
- *   RESEND_API_KEY / MAIL_FROM / MAIL_TO   邮件兜底（可选，不配则只推 Bark）
+ *   WECOM_WEBHOOK  企业微信群机器人 Webhook（主通道，2026-10-16 起）
+ *                  https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx
+ *   BARK_KEY       Bark key（企微失败时的兜底通道）
+ *   RESEND_API_KEY / MAIL_FROM / MAIL_TO   邮件兜底（可选，一二级通道全失败才走）
  */
 
 const API_BASE = 'https://jkzx.envsc.cn/transpublic-v2';
@@ -533,6 +535,55 @@ async function pushBark(key, title, body, level) {
   }
 }
 
+// ---------- 推送：企业微信群机器人（主通道，2026-10-16 起） ----------
+// 企微 text 消息上限 2048 字节（UTF-8）→ 这里按行切分为多条 ≤1900 字节的消息顺序发送，
+// 正常日报 1 条即可；超长报告自动拆成 2~3 条，不会静默丢内容。
+const WECOM_LIMIT = 1900;
+const utf8Len = (s) => new TextEncoder().encode(String(s)).length;
+async function pushWecom(env, title, body) {
+  const url = env.WECOM_WEBHOOK;
+  if (!url) return { channel: 'wecom', ok: false, error: 'WECOM_WEBHOOK 未配置' };
+  // 组包：按行累计；单行超长（正常不会出现）则硬切兜底
+  const msgs = [];
+  let cur = '';
+  const flush = () => { if (cur) { msgs.push(cur); cur = ''; } };
+  for (const raw of String(body ? `${title}\n${body}` : title).split('\n')) {
+    let line = raw;
+    while (utf8Len(line) > WECOM_LIMIT) {
+      let cut = Math.min(line.length, 700); // 中文约 3 字节/字，先粗切再收紧
+      while (cut > 1 && utf8Len(line.slice(0, cut)) > WECOM_LIMIT) cut -= 1;
+      flush();
+      msgs.push(line.slice(0, cut));
+      line = line.slice(cut);
+    }
+    const cand = cur ? `${cur}\n${line}` : line;
+    if (utf8Len(cand) > WECOM_LIMIT) { flush(); cur = line; } else { cur = cand; }
+  }
+  flush();
+  if (!msgs.length) msgs.push(title);
+  if (msgs.length > 5) { msgs.length = 5; msgs[4] += '\n…（内容过长，已截断）'; } // 极端兜底
+  try {
+    let last = null;
+    for (let i = 0; i < msgs.length; i++) {
+      const r = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ msgtype: 'text', text: { content: msgs[i] } }),
+      });
+      const txt = await r.text();
+      let json; try { json = JSON.parse(txt); } catch { json = { raw: txt.slice(0, 200) }; }
+      last = json;
+      if (!(r.status === 200 && json && json.errcode === 0)) {
+        return { channel: 'wecom', ok: false, chunks: msgs.length, resp: json };
+      }
+      if (i < msgs.length - 1) await sleep(300); // 机器人限 20 条/分钟，多段时留节奏
+    }
+    return { channel: 'wecom', ok: true, chunks: msgs.length, resp: last };
+  } catch (e) {
+    return { channel: 'wecom', ok: false, error: e.message };
+  }
+}
+
 // ---------- 推送：邮件兜底（Resend HTTP API；Workers 无 SMTP） ----------
 async function pushEmail(env, title, body) {
   if (!env.RESEND_API_KEY || !env.MAIL_TO || !env.MAIL_FROM) {
@@ -630,15 +681,16 @@ async function runInner(env) {
   const { title, body } = buildText(data, j, marks);
 
   // 有效传输率 100%（全达标且无标记/停运内容）→ **仅推送标题，不带正文**（2026-10-08 用户要求）。
-  // body 为空时 bark/email 只发 title；dedup 照常写入，当天后续整点不再重复推。
+  // body 为空时 wecom/bark/email 只发 title；dedup 照常写入，当天后续整点不再重复推。
   const fullOk = !String(body || '').trim();
   const pushBody = fullOk ? '' : body;
   const level = j.isCase1 ? 'active' : 'timeSensitive';
 
   const pushed = [];
-  const bark = await pushBark(env.BARK_KEY, title, pushBody, level);
-  pushed.push(bark);
-  if (!bark.ok) pushed.push(await pushEmail(env, title, pushBody));
+  const wecom = await pushWecom(env, title, pushBody);                            // 主通道：企业微信群机器人
+  pushed.push(wecom);
+  if (!wecom.ok) pushed.push(await pushBark(env.BARK_KEY, title, pushBody, level)); // 兜底：Bark
+  if (!pushed.some((p) => p.ok)) pushed.push(await pushEmail(env, title, pushBody)); // 最后：邮件
 
   const anyOk = pushed.some((p) => p.ok);
   if (anyOk) {
@@ -684,7 +736,7 @@ async function run(env) {
 // 静默失效——不报错、不推送，第二天才发现标记全丢。而费用中心的「可用额度预警」没有公开
 // OpenAPI（SDK 里只有给分销子账号用的 SetResellerUserAlarmThreshold），代设不了。
 // 于是用 Cloudflare 自己的 Cron 做反向自检：只看 KV 里有没有「今天写入的 marks:<D-1>」，
-// 完全不依赖阿里云任何权限。云函数挂了 →  Bark 告警。
+// 完全不依赖阿里云任何权限。云函数挂了 → 企业微信机器人告警（Bark 兜底）。
 async function watchdog(env) {
   const kv = env.ENVSC_KV;
   if (!kv) return { watchdog: 'skip', why: 'ENVSC_KV 未绑定' };
@@ -723,13 +775,18 @@ async function watchdog(env) {
   const title = `⚠️ 同步中断 ${day.replace(/-/g, '')}`;
   const body = `${why}。常见原因：① 阿里云欠费冻结（403 in debt，欠 2 分钱也停）；`
     + '② 企业端 cookie 失效；③ 函数异常。请查阿里云账户余额 + 函数 envsc-marks-sync。';
-  let bark = { channel: 'bark', ok: false, error: 'BARK_KEY 未配置' };
-  if (env.BARK_KEY) bark = await pushBark(env.BARK_KEY, title, body, 'timeSensitive');
+  const wecom = await pushWecom(env, title, body); // 主通道：企业微信群机器人
+  let bark = null;
+  if (!wecom.ok) {
+    bark = env.BARK_KEY
+      ? await pushBark(env.BARK_KEY, title, body, 'timeSensitive')
+      : { channel: 'bark', ok: false, error: 'BARK_KEY 未配置' };
+  }
   try { await kv.put(`wd:${today}`, now.toISOString()); } catch (e) { /* 幂等标记失败不影响告警本身 */ }
-  return { watchdog: 'alerted', day, today, why, bark };
+  return { watchdog: 'alerted', day, today, why, wecom, bark };
 }
 
-export { buildText, markText, fetchMarks, watchdog };
+export { buildText, markText, fetchMarks, watchdog, pushWecom };
 
 // 北京时间推送窗口：15:00–20:59（2026-10-08 用户要求；scheduled 与测试共用）
 export function inPushWindow(bjHour) {
@@ -783,6 +840,16 @@ export default {
           headers: { 'Content-Type': 'application/json; charset=utf-8' },
         });
       }
+    }
+    // 企微机器人通道自测（?k=<BARK_KEY> 鉴权）：向 WECOM_WEBHOOK 发一条测试消息，不碰业务数据
+    if (url.pathname === '/test-wecom') {
+      if (!env.BARK_KEY || url.searchParams.get('k') !== env.BARK_KEY) {
+        return new Response('not found', { status: 404 });
+      }
+      const r2 = await pushWecom(env, `envsc 企微通道测试 ${new Date().toISOString().slice(0, 19)}Z`, '企业微信群机器人通道连通正常。此消息为通道测试，可忽略。');
+      return new Response(JSON.stringify(r2, null, 2), {
+        headers: { 'Content-Type': 'application/json; charset=utf-8' },
+      });
     }
     // 看门狗手动触发（同样要 ?k=<BARK_KEY> 鉴权）；加 &reset=1 可清掉当天的告警幂等标记
     if (url.pathname === '/watchdog') {
