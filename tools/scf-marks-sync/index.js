@@ -241,30 +241,57 @@ function mergeContinuous(windows, rowMinutes, minMinutes) {
 const MP_FACTOR_NAMES = new Map();       // mpId -> Map(code -> name)
 const PARAM_CODE = /^[SB]\d{2}$/i;       // 工况参数编码（流量/流速/温度/湿度/压力/氧含量…）
 const FACTOR_NAMES = new Map();          // 兼容旧测试：最近一次加载的点
-async function loadFactorNames(mpId, dateStr) {
+// 拉取某监测点某天的「因子编号 → 名称」表（公开平台；必须带 date，当天无数据时接口返回空 list）
+async function fetchFactorNamesOfDay(mpId, day) {
+  const url = new URL('https://jkzx.envsc.cn/transpublic-v2/psinfo/pollutant/list');
+  url.searchParams.set('_t', String(Date.now()));
+  const r = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json', Referer: 'https://jkzx.envsc.cn/transpublic-v2/2026/' },
+    body: JSON.stringify({
+      psId: envOf(process.env, 'CNEMC_PSID', '654000000031'), mpId, dateType: 'DAY',
+      start: `${day} 00:00:00`, end: `${day} 23:59:59`,
+    }),
+  });
+  const list = (JSON.parse(await r.text()).data) || [];
   const map = new Map();
-  MP_FACTOR_NAMES.set(String(mpId), map);
+  for (const f of list) {
+    const code = String(f.pollutantCode || '');
+    // 污染物与工况参数一视同仁：只要平台给了名称就收录（2026-10-07 用户要求工况参数也推送）。
+    // 平台返回 null 名称的（如废水 B01）跳过 —— 无名可显示。
+    if (code && f.pollutantName) map.set(code, f.pollutantName);
+  }
+  return map;
+}
+
+// 2026-10-19：平台 D-1 的因子列表约 13:06 才更新，而同步在 12:55 跑 → 目标日可能为空，
+// 导致推送缺因子名。因子编号→名称 与日期无关，故目标日为空时依次回退前一/二天。
+async function loadFactorNames(mpId, dateStr) {
+  const key = String(mpId);
+  let map = new Map();
   try {
     const day = dateStr || ymd(new Date());
-    const url = new URL('https://jkzx.envsc.cn/transpublic-v2/psinfo/pollutant/list');
-    url.searchParams.set('_t', String(Date.now()));
-    const r = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Accept: 'application/json', Referer: 'https://jkzx.envsc.cn/transpublic-v2/2026/' },
-      body: JSON.stringify({
-        psId: envOf(process.env, 'CNEMC_PSID', '654000000031'), mpId, dateType: 'DAY',
-        start: `${day} 00:00:00`, end: `${day} 23:59:59`,
-      }),
-    });
-    const list = (JSON.parse(await r.text()).data) || [];
-    for (const f of list) {
-      const code = String(f.pollutantCode || '');
-      // 污染物与工况参数一视同仁：只要平台给了名称就收录（2026-10-07 用户要求工况参数也推送）。
-      // 平台返回 null 名称的（如废水 B01）跳过 —— 无名可显示。
-      if (code && f.pollutantName) map.set(code, f.pollutantName);
+    const base = new Date(`${day}T00:00:00`);
+    const days = [day];
+    for (let i = 1; i <= 2; i++) days.push(ymd(new Date(base.getTime() - i * 86400000)));
+    for (const d of days) {
+      try {
+        const m = await fetchFactorNamesOfDay(mpId, d);
+        if (m.size) { map = m; break; }
+      } catch (e) { /* 换下一天重试 */ }
+      await sleep(150);
     }
-    FACTOR_NAMES.clear();
-    for (const [k, v] of map) FACTOR_NAMES.set(k, v);
+    if (!map.size) {
+      const prev = MP_FACTOR_NAMES.get(key); // 同一实例内先前取到的非空结果优先保留
+      if (prev && prev.size) map = prev;
+    }
+    MP_FACTOR_NAMES.set(key, map);
+    if (map.size) {
+      FACTOR_NAMES.clear();
+      for (const [k, v] of map) FACTOR_NAMES.set(k, v);
+    } else {
+      say(`FACTOR_WARN ${mpId} 连续 3 天均未取到因子名（标记将不带因子名）`);
+    }
   } catch (e) {
     say(`FACTOR_WARN 因子名获取失败：${e.message}（标记将不带因子名）`);
   }
