@@ -1,6 +1,7 @@
 # 依赖与构建产物
 node_modules/
 dist/
+dist-*/
 
 # Wrangler 本地状态（KV 数据、账号缓存、miniflare sqlite）
 .wrangler/

@@ -1,1 +1,0 @@
-This folder contains the built output assets for the worker "envsc" generated at 2026-10-16T03:37:52.635Z.
