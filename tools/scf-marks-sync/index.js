@@ -15,7 +15,9 @@
  *     分钟接口 dateType=2 对废水点恒返回 0 行 —— 这正是"废水人工标记取不到"的根因。
  *   - 其余（废气 mpType=5）用 dateType=2（1440 行/天）。
  *   两种粒度行都带 rg_flag_*(人工) / zd_flag_*(自动) 字段：
- *     rg_flag_ 仅作兜底；zd_flag_（自动标记，>15min）照旧纳入。
+ *     rg_flag_ 仅作兜底；zd_flag_（自动标记）按两条规则纳入：
+ *       ① 连续段 ≥15min（含中间缺 1 分钟容错）；
+ *       ② 单个自然小时内累计覆盖 ≥15min（不要求连续，2026-10-19 用户要求）。
  *   ⚠️ 小时行的 data_time.item.label 形如 "2026-09-22 18~19"（区间），需专门解析起点整点。
  *
  * 平台（同一份代码通用，2026-09-27 起）：
@@ -61,14 +63,25 @@ async function getKV(acc, ns, token, key) {
   if (!r.ok) throw new Error(`KV GET ${r.status}`);
   return await r.text();
 }
+// 写 KV：带重试（2026-10-19 实测 SCF→api.cloudflare.com 偶发 fetch failed，重试可显著降低丢写概率）
 async function putKV(acc, ns, token, key, value, ttl) {
   const q = ttl ? `?expiration_ttl=${ttl}` : '';
-  const r = await fetch(`https://api.cloudflare.com/client/v4/accounts/${acc}/storage/kv/namespaces/${ns}/values/${encodeURIComponent(key)}${q}`, {
-    method: 'PUT', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: value,
-  });
-  const t = await r.text();
-  if (!r.ok) throw new Error(`KV PUT ${r.status}: ${t.slice(0, 240)}`);
-  return t;
+  const url = `https://api.cloudflare.com/client/v4/accounts/${acc}/storage/kv/namespaces/${ns}/values/${encodeURIComponent(key)}${q}`;
+  let lastErr;
+  for (let i = 0; i < 4; i++) {
+    try {
+      const r = await fetch(url, {
+        method: 'PUT', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: value,
+      });
+      const t = await r.text();
+      if (!r.ok) throw new Error(`KV PUT ${r.status}: ${t.slice(0, 240)}`);
+      return t;
+    } catch (e) {
+      lastErr = e;
+      if (i < 3) await sleep(1200 * (i + 1)); // 1.2s / 2.4s / 3.6s 退避
+    }
+  }
+  throw lastErr;
 }
 
 // ---------- Bark 告警 ----------
@@ -423,7 +436,33 @@ function payloadEvent(raw) {
 
 // ---------- 主入口 ----------
 // 导出内部函数供单测使用（不改变云端行为）
-exports._test = { mergeContinuous, mergeSameLabelSegs, extractWindows, windowText, segsText, FACTOR_NAMES, MP_FACTOR_NAMES, PARAM_CODE, qyText, factorNameOf, factorMapOf };
+// 规则B（2026-10-19 用户要求）：不要求连续——单个自然小时内标记累计 ≥15min 也保留，
+// 即"占该小时数据 ≥15 分钟"的分钟级标记同样进推送（例如一小时里 3 段各 6 分钟的校准）。
+// 说明：同一分钟被多个因子同时标记只计 1 次（按"分钟覆盖"去重，避免多因子重复计数抬高覆盖）。
+function keepByHourCoverage(windows, rowMinutes, minPerHour) {
+  const min = minPerHour || 15;
+  const stepMs = rowMinutes * 60000;
+  const byHour = new Map(); // 小时起点 -> { minutes:Set<采样时刻>, wins:Set<窗口> }
+  for (const w of windows) {
+    const s = toMs(w.start);
+    const n = w.n || rowMinutes;
+    for (let i = 0; i < n; i += rowMinutes) {
+      const t = s + i * stepMs;
+      const h = Math.floor(t / 3600000) * 3600000;
+      if (!byHour.has(h)) byHour.set(h, { minutes: new Set(), wins: new Set() });
+      const rec = byHour.get(h);
+      rec.minutes.add(t);
+      rec.wins.add(w);
+    }
+  }
+  const keep = new Set();
+  for (const [, rec] of byHour) {
+    if (rec.minutes.size >= min) for (const w of rec.wins) keep.add(w);
+  }
+  return [...keep];
+}
+
+exports._test = { mergeContinuous, mergeSameLabelSegs, extractWindows, windowText, segsText, FACTOR_NAMES, MP_FACTOR_NAMES, PARAM_CODE, qyText, factorNameOf, factorMapOf, keepByHourCoverage };
 
 exports.main_handler = async (event, context) => {
   const ev = event || {};
@@ -610,9 +649,12 @@ exports.main_handler = async (event, context) => {
       try { rows = await getRows(cookie, psid, industry, mp, date); okCount++; }
       catch (e) { say(`SYNC_WARN ${date} ${mp.name} 抓取失败：${e.message}`); failCount++; await sleep(1000); continue; }
       const rg = extractWindows(rows, 'rg_flag_', rm);
-      // 自动标记：先按 label 提窗口，再按「连续标记总时长 ≥15min」整链保留（2026-10-06 新规则）
+      // 自动标记：规则A = 连续标记总时长 ≥15min（整链保留，含缺 1 分钟容错）；
+      //             规则B = 单个自然小时内累计覆盖 ≥15min 也保留（不要求连续，2026-10-19 用户要求）
       const zdAll = extractWindows(rows, 'zd_flag_', rm);
-      const zd = mergeContinuous(zdAll, rm, 15);
+      const zdKept = mergeContinuous(zdAll, rm, 15);
+      const zdHour = keepByHourCoverage(zdAll, rm, 15);
+      const zd = [...new Set([...zdKept, ...zdHour])].sort((a, b) => (a.start < b.start ? -1 : a.start > b.start ? 1 : 0));
       const qyList = qyMap.get(mp.name) || null;
       // 人工标记：填报记录（精确）> 数据行 rg_flag_ 扫描（兜底）
       const manualText = (qyList && qyList.length) ? qyText(qyList)
