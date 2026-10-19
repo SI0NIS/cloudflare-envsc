@@ -446,10 +446,13 @@ function buildText(data, j, marks) {
     if (a.ex) {
       lines.push(`· ${mp.mpName}（${a.ex.reason}）`);
     } else if (a.marked && !a.under) {
-      // 达标但有标记（废水 ≤1h 标样核查被官方豁免）：标注豁免，避免"100% 却异常"的困惑
+      // 达标但有标记：
+      //   废水 ≤1h 标样核查被官方豁免 → 标注"已豁免"，避免"100% 却异常"的困惑；
+      //   其余点（如 2026-10-19 规则B 纳入的"单小时 ≥15min 校准/维护"点）不加豁免标注，避免误导。
       const rt = mp.realtime ? mp.realtime.effeTransRate : null;
       const cp = mp.comple ? mp.comple.effeTransRate : null;
-      lines.push(`· ${mp.mpName}　即时 ${pct(rt)} / 补全 ${pct(cp)}（≤1h 标样核查，已豁免）`);
+      const wwNote = isWastewaterOk(mp) ? '（≤1h 标样核查，已豁免）' : '';
+      lines.push(`· ${mp.mpName}　即时 ${pct(rt)} / 补全 ${pct(cp)}${wwNote}`);
     } else {
       const rt = mp.realtime ? mp.realtime.effeTransRate : null;
       const cp = mp.comple ? mp.comple.effeTransRate : null;
