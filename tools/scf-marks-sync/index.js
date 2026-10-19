@@ -168,8 +168,11 @@ function extractWindows(rows, prefix, rowMinutes) {
     for (let i = 0; i < ts.length; i++) {
       const t = ts[i], prev = ts[i - 1];
       const gap = prev ? toMs(t) - toMs(prev) : 0;
+      // 容忍中间缺 1 个采样点（gap ≤ 2 个步长）：平台偶发缺分钟会把一段连续标记切断，
+      // 严格按 1 步长判定会让"15:29~15:47"这种真实约 19 分钟的段被拆成 11min+7min 而整段被 15min 门槛丢掉
+      // （2026-10-16 环保尾气排放口实例）。
       if (!cur) cur = { label, detail, code, start: t, end: t, n: rowMinutes, rowMinutes };
-      else if (gap <= stepMs) { cur.end = t; cur.n = Math.round((toMs(cur.end) - toMs(cur.start)) / 60000) + rowMinutes; }
+      else if (gap <= stepMs * 2) { cur.end = t; cur.n = Math.round((toMs(cur.end) - toMs(cur.start)) / 60000) + rowMinutes; }
       else { windows.push(cur); cur = { label, detail, code, start: t, end: t, n: rowMinutes, rowMinutes }; }
     }
     if (cur) windows.push(cur);
@@ -450,7 +453,7 @@ exports.main_handler = async (event, context) => {
   // {"clearDedup":"2026-09-22"}  删除 Worker 去重键（用于强制重推某天）
   // {"setDedup":"2026-09-22"}    写回去重键（用于「按住」推送，避免整点 cron 抢先）
   // {"triggerWorker":"https://..."}  让云函数代为调用 Worker（本机到 CF 不通时用）
-  if (ev.clearDedup || ev.setDedup || ev.triggerWorker) {
+  if (ev.clearDedup || ev.setDedup || ev.triggerWorker || ev.dumpRows) {
     const out = {};
     const valUrl = (k) => `https://api.cloudflare.com/client/v4/accounts/${acc}/storage/kv/namespaces/${ns}/values/${encodeURIComponent(k)}`;
     if (ev.clearDedup && canKV) {
@@ -475,6 +478,90 @@ exports.main_handler = async (event, context) => {
         out.worker = { status: r.status, body: t.slice(0, 2000) };
         say(`TRIGGER_WORKER -> ${r.status}`);
       } catch (e) { out.worker = { error: String(e.message || e) }; }
+    }
+    // {"dumpRows":"2026-10-16","mp":"3号机组"}  诊断：抓原始标记字段（只读，不写 KV、不告警）
+    // 排查"某天标记突然变空"用：看 /sign/qy/list 各 type 的条数与状态、行数据里 flag 字段是否存在。
+    if (ev.dumpRows) {
+      const dateD = String(ev.dumpRows);
+      const dump = { date: dateD, qy: {}, rows: {} };
+      // ① 人工标记原始响应（type 1~5，status=-1 不筛；看返回条数与每条 status 值）
+      for (const type of ['1', '2', '3', '4', '5']) {
+        try {
+          const { st, text } = await req(cookie, '/sign/qy/list', {
+            pageNum: '1', pageSize: '200', dateTime: `${dateD},${dateD}`, type,
+            moduleCode: '', mpId: '-1', shId: '-1', psId: psid, status: '-1',
+          });
+          let count = null, sample = text.slice(0, 200);
+          try {
+            const j2 = JSON.parse(text);
+            const rows2 = (j2.data && j2.data.rows) || [];
+            count = rows2.length;
+            sample = rows2.slice(0, 2).map((x) => ({
+              mpName: x.mpName, reviseFlagName: x.reviseFlagName, startTime: x.startTime,
+              endTime: x.endTime, status: x.status, monitorName: x.monitorName,
+            }));
+          } catch (e2) { /* 保留原文 */ }
+          dump.qy[type] = { st, count, sample };
+        } catch (e2) { dump.qy[type] = { error: String(e2.message || e2) }; }
+        await sleep(200);
+      }
+      // ② 行数据：生产同款 props 抓一次，看 flag 字段与样本
+      try {
+        const mps2 = await getMps(cookie, psid);
+        const want = String(ev.mp || '3号机组');
+        const mp2 = mps2.find((m) => String(m.name).indexOf(want) >= 0) || mps2.find((m) => m.mpType === '5');
+        if (!mp2) throw new Error('no matching mp');
+        const qs = new URLSearchParams({
+          method: 'online-monitor/data/list', psId: psid, id: mp2.id, mpType: mp2.mpType,
+          dateType: String(dateTypeOf(mp2)), dateTime: `${dateD} 00:00:00,${dateD} 23:59:59`,
+          isCity: '0', netWorkType: '1', normalKey: '0', industryType: industry, zs: '',
+          pageNum: '1', pageSize: '3000', filterItem: '', filterWork: 'false', sort: '0',
+          props: 'data_time,zd_workcordSc,rg_workcordSc', _t: String(Date.now()),
+        });
+        const r2 = await fetch(`${ROUTER}?${qs}`, { headers: H(cookie) });
+        const t2 = await r2.text();
+        try {
+          const j2 = JSON.parse(t2);
+          const rows2 = (j2.data && j2.data.rows) || [];
+          const keys = new Set();
+          let flagged = null;
+          const labelStats = {}; // 每个 zd/rg_flag 字段上出现过的 label 及次数
+          const minutes = {};    // 每个字段的非"数据有效"分钟明细（时间|标签，最多 200 条）
+          const samples = [];    // 含非基线标记的整行样本（最多 2 行，看 workcord 等复合字段）
+          for (const row of rows2) {
+            const tt = (row.data_time && row.data_time.item && row.data_time.item.label) || '';
+            let interesting = false;
+            for (const [k, v] of Object.entries(row)) {
+              if (!/^(zd|rg)_flag_/.test(k)) continue;
+              const lb = v && v.item && v.item.label;
+              if (!lb) continue;
+              labelStats[k] = labelStats[k] || {};
+              labelStats[k][lb] = (labelStats[k][lb] || 0) + 1;
+              if (lb === '数据有效' || lb === '--') continue;
+              minutes[k] = minutes[k] || [];
+              if (minutes[k].length < 200) minutes[k].push(`${tt}|${lb}`);
+              interesting = true;
+            }
+            if (interesting && samples.length < 2) samples.push(row);
+            for (const [k, v] of Object.entries(row)) {
+              if (!/flag/i.test(k) && !/workcord/i.test(k)) continue;
+              keys.add(k);
+              const lb = v && v.item && v.item.label;
+              if (!flagged && lb && lb !== '--') flagged = { key: k, item: v.item, dataTime: row.data_time && row.data_time.item && row.data_time.item.label };
+            }
+          }
+          dump.rows = {
+            mp: mp2.name, mpType: mp2.mpType, rowCount: rows2.length,
+            fieldKeys: [...keys].slice(0, 20),
+            labelStats,
+            minutes,
+            samples,
+            sampleFlagged: flagged,
+          };
+        } catch (e2) { dump.rows = { status: r2.status, bodyHead: t2.slice(0, 300) }; }
+      } catch (e2) { dump.rows = { error: String(e2.message || e2) }; }
+      say(`DUMP_ROWS ${dateD} done`);
+      return { ok: true, dump, log };
     }
     return { ok: true, ...out, log };
   }
