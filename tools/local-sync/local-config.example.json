@@ -1,0 +1,17 @@
+{
+  "_comment": "复制为 local-config.json 后填入真实值（该文件已被 .gitignore 忽略，切勿提交）",
+  "cnemc": {
+    "cookie": "jointframe.cluster.sessionid=xxxx（可留空，由 auto-login 自动写入 runtime/cnemc-cookie.txt）",
+    "psid": "654000000031",
+    "account": "企业端登录账号",
+    "password": "企业端登录密码"
+  },
+  "cloudflare": {
+    "accountId": "Cloudflare Account ID",
+    "kvNamespaceId": "KV Namespace ID",
+    "apiToken": "Cloudflare API Token（需 KV 读写权限）"
+  },
+  "bark": {
+    "key": "Bark 设备 key（失败告警用，可留空）"
+  }
+}

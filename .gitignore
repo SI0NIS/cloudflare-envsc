@@ -23,3 +23,8 @@ tools/_dm_cookie*_
 
 # 日志
 *.log
+
+# local-sync（本机兜底脚本）：密钥与运行时数据不入库
+tools/local-sync/local-config.json
+tools/local-sync/runtime/
+tools/local-sync/auto-login/node_modules/
