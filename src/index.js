@@ -29,12 +29,48 @@ const API_BASE = 'https://jkzx.envsc.cn/transpublic-v2';
 const MARKS_HOST = 'http://116.178.28.170:3080';
 const MARKS_PATH = '/amOnline/app/baseroute/requestRoute!list.page';
 const MARKS_REFERER = 'http://116.178.28.170:3080/amOnline/zdjk-company/';
-const COMPANY_NAME = '伊犁川宁生物技术股份有限公司';
 
-// 不计入统计的监控点（与本机 mp-exclusions.json 保持一致）
-const EXCLUSIONS = [
-  { name: '3号机组', reason: '工况标记：停运，不计入有效传输率统计时段', onlyWhenZero: true },
-];
+// ---------- 项目业务配置（config/project.json 为唯一事实来源；缺失字段用内置默认值兜底） ----------
+// 2026-10-22 波次1（P0）：业务常量出源码——排除点/公司名/阈值/推送窗口改这里即可，
+// 不再需要在 Worker 源码与本机文件之间手工对两份。
+import PROJECT_JSON from '../config/project.json' with { type: 'json' };
+
+const PROJECT_DEFAULTS = {
+  psId: '654000000031',
+  companyName: '伊犁川宁生物技术股份有限公司',
+  exclusions: [
+    { name: '3号机组', reason: '工况标记：停运，不计入有效传输率统计时段', onlyWhenZero: true },
+  ],
+  thresholds: { autoMarkMinMinutes: 15, autoMarkMinPerHour: 15 },
+  pushWindow: { startHour: 15, endHour: 21 },
+};
+
+const PROJECT = { ...PROJECT_DEFAULTS, ...(PROJECT_JSON || {}) };
+
+// 启动校验：配置非法必须「响亮的失败」——由 run() 兜底写 last-result，绝不用默认值静默跑错业务。
+// （模块加载阶段不抛错，保证测试与 buildText 等纯函数可正常导入。）
+function validateProjectConfig() {
+  const problems = [];
+  if (!/^\d{10,}$/.test(String(PROJECT.psId || ''))) problems.push(`psId 非法: ${PROJECT.psId}`);
+  if (typeof PROJECT.companyName !== 'string' || !PROJECT.companyName) problems.push('companyName 缺失');
+  if (!Array.isArray(PROJECT.exclusions)) problems.push('exclusions 必须是数组');
+  else for (const ex of PROJECT.exclusions) {
+    if (!ex || typeof ex.name !== 'string' || !ex.name) problems.push(`exclusions 条目缺 name: ${JSON.stringify(ex)}`);
+  }
+  const t = PROJECT.thresholds || {};
+  for (const k of ['autoMarkMinMinutes', 'autoMarkMinPerHour']) {
+    if (!Number.isFinite(t[k]) || t[k] < 1 || t[k] > 120) problems.push(`thresholds.${k} 非法: ${t[k]}`);
+  }
+  const w = PROJECT.pushWindow || {};
+  if (!Number.isInteger(w.startHour) || !Number.isInteger(w.endHour) || w.startHour >= w.endHour) {
+    problems.push(`pushWindow 非法: ${JSON.stringify(w)}`);
+  }
+  if (problems.length) throw new Error(`project.json 配置非法：\n- ${problems.join('\n- ')}`);
+}
+
+const COMPANY_NAME = PROJECT.companyName;
+// 不计入统计的监控点（来源：config/project.json）
+const EXCLUSIONS = PROJECT.exclusions;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -350,7 +386,7 @@ async function fetchMarksPublic(psId, day) {
   return { attempted: true, total, byMp, error: null, source: 'public' };
 }
 
-// ---------- 人工标记：优先读 KV（由本机 tools/marks-sync.mjs 在境内抓取后回写） ----------
+// ---------- 人工标记：优先读 KV（由本机 tools/local-sync 在境内抓取后回写；历史为云函数） ----------
 // 为什么：企业端 116.178.28.170:3080 只对国内 IP 开放，Cloudflare 边缘（境外）连不上
 // （境外直连超时，裸 IP 还会被 Cloudflare 以 error code 1003 拒绝）。
 // 故抓取放在本机，结果落到 KV，边缘只负责读。这样零服务器、零厂商额度、长期免费。
@@ -563,8 +599,9 @@ async function pushEmail(env, title, body) {
 
 // ---------- 主流程 ----------
 async function runInner(env) {
+  validateProjectConfig(); // 配置非法 → 抛错（run() 兜底落 last-result，不静默跑错）
   const day = d1Str();
-  const psId = env.CNEMC_PSID || '654000000031';
+  const psId = env.CNEMC_PSID || PROJECT.psId;
 
   // 去重（KV）
   let done = null;
@@ -730,9 +767,10 @@ async function watchdog(env) {
 
 export { buildText, markText, fetchMarks, watchdog };
 
-// 北京时间推送窗口：15:00–20:59（2026-10-08 用户要求；scheduled 与测试共用）
+// 北京时间推送窗口：默认 15:00–20:59（2026-10-08 用户要求；scheduled 与测试共用）
+// 窗口来自 config/project.json 的 pushWindow。
 export function inPushWindow(bjHour) {
-  return bjHour >= 15 && bjHour < 21;
+  return bjHour >= PROJECT.pushWindow.startHour && bjHour < PROJECT.pushWindow.endHour;
 }
 
 export default {
@@ -766,7 +804,7 @@ export default {
       if (!env.BARK_KEY || url.searchParams.get('k') !== env.BARK_KEY) {
         return new Response('not found', { status: 404 });
       }
-      const target = 'http://116.178.28.170:3080/amOnline/app/baseroute/requestRoute!list.page?method=/psbase/mpinfo/getMpInfoByPsId&psId=654000000031';
+      const target = `http://116.178.28.170:3080/amOnline/app/baseroute/requestRoute!list.page?method=/psbase/mpinfo/getMpInfoByPsId&psId=${encodeURIComponent(PROJECT.psId)}`;
       const t0 = Date.now();
       try {
         const r = await fetch(target, {

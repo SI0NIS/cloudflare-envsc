@@ -1,17 +1,25 @@
-// run_scf_local.cjs —— 本机执行 ENVSC 标记同步（与腾讯云函数同一份代码）
+// run_scf_local.cjs —— 本机执行 ENVSC 标记同步（与云函数同一份代码）
 //
-// 用途：云函数不可用（欠费/故障）时，由本机计划任务每天 14:58 执行，早于 15:00 推送。
+// 用途：云函数不可用（欠费/故障）时，由本机计划任务每天 14:58 执行，早于 15:00 推送；
+//       另注册「登录时」触发，开机发现昨天数据缺失时补跑。
 // 依赖：node（本机）+ tools/scf-marks-sync/index.js + 同目录 local-config.json（密钥，gitignore）
 //
 // 逻辑：
 //   1) 目标日默认「昨天（北京时间）」，--quick=只同步 D-1；无参数=days=2；
-//   2) 先查 KV marks:<日期>.at，若已是今天（云端或本机已同步）→ 跳过（--force 可忽略）；
-//   3) 同步前 ensureCookie：校验企业端 cookie，无效则调用 auto-login 自动续期；
+//   2) 跳过检查（三档）：
+//      - 默认：marks:<日期>.at 是今天 且 载荷 sync 完备（failCount==0 且 okCount==监测点总数）
+//        → 跳过（--force 可忽略）；at 是今天但载荷缺 sync 字段（旧格式）→ 视为可信跳过；
+//      - --quick 同上（每日 14:58 正式档：数据不全就补抓）；
+//      - --if-missing：只要 marks:<日期> 存在即跳过（登录补跑档：只补缺，不覆盖，
+//        避免抢在 14:58 正式档前面写"半成品"导致正式档被跳过）；
+//   3) 同步前 ensureCookie：校验企业端 cookie（决策落日志），无效则调 auto-login 续期；
 //   4) 调 SCF 的 main_handler 抓标记写 KV；失败 Bark 告警（每天一次）；
-//   5) 日志：runtime/logs/scf-local-YYYY-MM-DD.log；退出码 0=成功/跳过，1=失败。
+//   5) 日志：runtime/logs/scf-local-YYYY-MM-DD.log（1MB 轮转，保留 3 份）；
+//      退出码 0=成功/跳过，1=失败。
 const fs = require('fs');
 const path = require('path');
 const { execFileSync } = require('child_process');
+const { createLogger } = require('./lib/log');
 
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
 const RUNTIME = path.join(__dirname, 'runtime');
@@ -27,7 +35,15 @@ function loadConfig() {
   } catch (e) { /* ignore */ }
   return {};
 }
+// 项目业务配置（config/project.json；缺失字段用默认值兜底）
+function loadProjectConfig() {
+  try {
+    const j = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'config', 'project.json'), 'utf8'));
+    return { psId: '654000000031', ...j };
+  } catch (e) { return { psId: '654000000031' }; }
+}
 const CFG = loadConfig();
+const PROJECT = loadProjectConfig();
 const CNEMC = CFG.cnemc || {};
 const CFG_CF = CFG.cloudflare || {};
 const BARK = (CFG.bark || {}).key || process.env.BARK_KEY || '';
@@ -42,16 +58,11 @@ const args = process.argv.slice(2);
 const dateArg = args.find((a) => /^\d{4}-\d{2}-\d{2}$/.test(a));
 const date = dateArg || yesterdayBJ;
 const quick = args.includes('--quick');
+const ifMissing = args.includes('--if-missing');
 const daysArg = args.find((a) => /^\d+$/.test(a));
 const days = quick ? 1 : Number(daysArg || 2);
 const force = args.includes('--force');
-const logPath = path.join(LOG_DIR, `scf-local-${todayBJ}.log`);
-
-function log(msg) {
-  const line = `[${new Date().toISOString()}] ${msg}`;
-  console.log(line);
-  try { fs.appendFileSync(logPath, line + '\n', 'utf8'); } catch (e) { /* ignore */ }
-}
+const { log } = createLogger('scf-local', LOG_DIR);
 
 function readCookie() {
   try {
@@ -68,7 +79,7 @@ const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,
 async function cookieValid(cookie) {
   if (!cookie) return false;
   try {
-    const psid = CNEMC.psid || '654000000031';
+    const psid = CNEMC.psid || PROJECT.psid || '654000000031';
     const url = `http://116.178.28.170:3080/amOnline/app/baseroute/requestRoute!list.page?method=/psbase/mpinfo/getMpInfoByPsId&psId=${psid}&_t=${Date.now()}`;
     const r = await fetch(url, {
       headers: {
@@ -82,21 +93,25 @@ async function cookieValid(cookie) {
   } catch (e) { return false; }
 }
 
+// cookie 指纹（日志用，只暴露前 8 位，防泄漏）
+const fp = (c) => (c ? c.replace(/^jointframe\.cluster\.sessionid=/, '').slice(0, 8) + '…' : '(空)');
+
 async function ensureCookie() {
   const cur = readCookie();
-  if (await cookieValid(cur)) { log('cookie 有效'); return cur; }
-  log('cookie 无效/过期 → 调用自动登录续期…');
+  if (await cookieValid(cur)) { log(`cookie 有效（${fp(cur)}），无需续期`); return cur; }
+  log(`cookie 无效/过期（${fp(cur)}）→ 调用自动登录续期…`);
   try {
     execFileSync(process.execPath, [path.join(__dirname, 'auto-login', 'auto-login.cjs')], {
       timeout: 240000, stdio: 'ignore',
       env: { ...process.env, HTTP_PROXY: '', HTTPS_PROXY: '', http_proxy: '', https_proxy: '', ALL_PROXY: '', all_proxy: '' },
     });
+    log('auto-login 子进程已返回');
   } catch (e) {
     log(`自动登录执行失败：${(e.message || e).toString().slice(0, 200)}`);
   }
   const fresh = readCookie();
-  if (fresh && fresh !== cur && await cookieValid(fresh)) { log('自动登录成功，cookie 已更新'); return fresh; }
-  log('自动登录后 cookie 仍无效');
+  if (fresh && fresh !== cur && await cookieValid(fresh)) { log(`自动登录成功，cookie 已更新（${fp(fresh)}）`); return fresh; }
+  log('自动登录后 cookie 仍无效（或未被更新）');
   return null;
 }
 
@@ -128,20 +143,37 @@ async function kvGet(key) {
   return JSON.parse(await r.text());
 }
 
+// 完备性判定（2026-10-22 波次1）：at 是今天 ≠ 抓全。
+// 新格式载荷（带 sync）：failCount==0 且 okCount==mpsTotal(>0) 才算可信；
+// 旧格式载荷（无 sync）：保持旧语义（at 是今天即可信）。
+function payloadComplete(m) {
+  if (!m || !m.at) return { complete: false, why: '无载荷/at' };
+  const atBJ = ymd(new Date(new Date(m.at).getTime() + TZ));
+  if (atBJ !== todayBJ) return { complete: false, why: `at=${m.at}（北京 ${atBJ}，非今天）` };
+  const s = m.sync;
+  if (!s) return { complete: true, why: '旧格式载荷（无 sync 字段），at 今天视为可信' };
+  if (s.failCount > 0) return { complete: false, why: `sync.failCount=${s.failCount}（${JSON.stringify(s.perMp || {})}）` };
+  if (!(s.okCount > 0) || s.okCount !== s.mpsTotal) return { complete: false, why: `sync.okCount=${s.okCount} != mpsTotal=${s.mpsTotal}` };
+  return { complete: true, why: `sync 完备（okCount=${s.okCount}，${new Date(m.at).toISOString().slice(11, 19)} 写入）` };
+}
+
 (async () => {
-  log(`=== 开始：目标日=${date} days=${days} 本机日期=${todayBJ}${force ? ' (--force)' : ''} ===`);
-  let already = false;
+  log(`=== 开始：目标日=${date} days=${days} 本机日期=${todayBJ}${force ? ' (--force)' : ''}${quick ? ' (--quick)' : ''}${ifMissing ? ' (--if-missing)' : ''} ===`);
+  let skip = null;
   try {
     const m = await kvGet(`marks:${date}`);
-    if (m && m.at) {
-      const atBJ = ymd(new Date(new Date(m.at).getTime() + TZ));
-      if (atBJ === todayBJ) { already = true; log(`marks:${date} 已于今天 ${m.at} 同步过 → 跳过`); }
+    if (ifMissing) {
+      if (m) skip = `marks:${date} 已存在（--if-missing 只补缺不覆盖）`;
+    } else if (m) {
+      const chk = payloadComplete(m);
+      if (chk.complete) skip = `marks:${date} 已同步且可信：${chk.why}`;
+      else log(`marks:${date} 今天写过但不可信（${chk.why}）→ 重新抓取`);
     }
   } catch (e) {
     log(`KV 预检查失败（不阻断）：${e.message}`);
   }
-  if (already && !force) { log('=== 跳过（今日已同步，无需重复抓取）==='); process.exit(0); }
-  if (already && force) log('(--force 忽略"今日已同步"检查)');
+  if (skip && !force) { log(`=== 跳过（${skip}）===`); process.exit(0); }
+  if (skip && force) log('(--force 忽略跳过检查)');
 
   const cookie = await ensureCookie();
   if (!cookie) {
@@ -154,7 +186,7 @@ async function kvGet(key) {
   process.env.CF_ACCOUNT_ID = CFG_CF.accountId;
   process.env.CF_KV_NAMESPACE_ID = CFG_CF.kvNamespaceId;
   process.env.CF_API_TOKEN = CFG_CF.apiToken;
-  process.env.CNEMC_PSID = CNEMC.psid || '654000000031';
+  process.env.CNEMC_PSID = CNEMC.psid || PROJECT.psid || '654000000031';
   process.env.DAYS = String(days);
 
   try {

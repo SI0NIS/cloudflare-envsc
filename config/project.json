@@ -1,0 +1,13 @@
+{
+  "$schema": "项目业务配置（唯一事实来源）：业务常量出源码，改配置不改代码",
+  "psId": "654000000031",
+  "companyName": "伊犁川宁生物技术股份有限公司",
+  "exclusions": [
+    { "name": "3号机组", "reason": "工况标记：停运，不计入有效传输率统计时段", "onlyWhenZero": true }
+  ],
+  "thresholds": {
+    "autoMarkMinMinutes": 15,
+    "autoMarkMinPerHour": 15
+  },
+  "pushWindow": { "startHour": 15, "endHour": 21 }
+}

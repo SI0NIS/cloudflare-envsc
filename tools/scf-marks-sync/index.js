@@ -55,6 +55,24 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const envOf = (e, k, d) => (e && e[k] != null && e[k] !== '') ? String(e[k]) : d;
 const ymd = (d) => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
 
+// ---------- 项目业务配置（config/project.json；单文件部署到云端时文件不存在 → 内置默认值兜底） ----------
+const PROJECT_DEFAULTS = {
+  psId: '654000000031',
+  thresholds: { autoMarkMinMinutes: 15, autoMarkMinPerHour: 15 },
+};
+function loadProjectConfig() {
+  try {
+    const fs = require('fs');
+    const path = require('path');
+    const raw = fs.readFileSync(path.join(__dirname, '..', '..', 'config', 'project.json'), 'utf8');
+    const j = JSON.parse(raw);
+    return { ...PROJECT_DEFAULTS, ...j, thresholds: { ...PROJECT_DEFAULTS.thresholds, ...(j.thresholds || {}) } };
+  } catch (e) {
+    return PROJECT_DEFAULTS;
+  }
+}
+const PROJECT = loadProjectConfig();
+
 // ---------- Cloudflare KV（REST API） ----------
 async function getKV(acc, ns, token, key) {
   const r = await fetch(`https://api.cloudflare.com/client/v4/accounts/${acc}/storage/kv/namespaces/${ns}/values/${encodeURIComponent(key)}`,
@@ -249,7 +267,7 @@ async function fetchFactorNamesOfDay(mpId, day) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Accept: 'application/json', Referer: 'https://jkzx.envsc.cn/transpublic-v2/2026/' },
     body: JSON.stringify({
-      psId: envOf(process.env, 'CNEMC_PSID', '654000000031'), mpId, dateType: 'DAY',
+      psId: envOf(process.env, 'CNEMC_PSID', PROJECT.psId), mpId, dateType: 'DAY',
       start: `${day} 00:00:00`, end: `${day} 23:59:59`,
     }),
   });
@@ -494,7 +512,7 @@ exports._test = { mergeContinuous, mergeSameLabelSegs, extractWindows, windowTex
 exports.main_handler = async (event, context) => {
   const ev = event || {};
   const cookie = envOf(ev, 'cookie', process.env.CNEMC_COOKIE || '');
-  const psid = envOf(ev, 'psid', process.env.CNEMC_PSID || '654000000031');
+  const psid = envOf(ev, 'psid', process.env.CNEMC_PSID || PROJECT.psId);
   const industry = envOf(ev, 'industry', process.env.INDUSTRY_TYPE || '00');
   const days = Math.max(1, parseInt(envOf(ev, 'days', process.env.DAYS || '2'), 10) || 2);
   const dry = !!ev.dry, silent = !!ev.silent;
@@ -654,6 +672,7 @@ exports.main_handler = async (event, context) => {
 
   let okCount = 0, failCount = 0;
   const written = [];
+  const perMp = {}; // 每个监测点当次抓取状态（供消费方做完备性检查）
   for (const date of dates) {
     const byMp = {}; let total = 0;
     // 监测因子编号 → 名称（公开平台；**必须带 date**，当天无数据时接口返回空 list）
@@ -673,14 +692,15 @@ exports.main_handler = async (event, context) => {
     for (const mp of mps) {
       const rm = rowMinutesOf(mp);
       let rows;
-      try { rows = await getRows(cookie, psid, industry, mp, date); okCount++; }
-      catch (e) { say(`SYNC_WARN ${date} ${mp.name} 抓取失败：${e.message}`); failCount++; await sleep(1000); continue; }
+      try { rows = await getRows(cookie, psid, industry, mp, date); okCount++; perMp[mp.name] = 'ok'; }
+      catch (e) { say(`SYNC_WARN ${date} ${mp.name} 抓取失败：${e.message}`); failCount++; perMp[mp.name] = 'fail'; await sleep(1000); continue; }
       const rg = extractWindows(rows, 'rg_flag_', rm);
-      // 自动标记：规则A = 连续标记总时长 ≥15min（整链保留，含缺 1 分钟容错）；
-      //             规则B = 单个自然小时内累计覆盖 ≥15min 也保留（不要求连续，2026-10-19 用户要求）
+      // 自动标记：规则A = 连续标记总时长 ≥阈值（整链保留，含缺 1 分钟容错）；
+      //             规则B = 单个自然小时内累计覆盖 ≥阈值也保留（不要求连续，2026-10-19 用户要求）
+      // 阈值来自 config/project.json（云端单文件部署时回退默认 15）。
       const zdAll = extractWindows(rows, 'zd_flag_', rm);
-      const zdKept = mergeContinuous(zdAll, rm, 15);
-      const zdHour = keepByHourCoverage(zdAll, rm, 15);
+      const zdKept = mergeContinuous(zdAll, rm, PROJECT.thresholds.autoMarkMinMinutes);
+      const zdHour = keepByHourCoverage(zdAll, rm, PROJECT.thresholds.autoMarkMinPerHour);
       const zd = [...new Set([...zdKept, ...zdHour])].sort((a, b) => (a.start < b.start ? -1 : a.start > b.start ? 1 : 0));
       const qyList = qyMap.get(mp.name) || null;
       // 人工标记：填报记录（精确）> 数据行 rg_flag_ 扫描（兜底）
@@ -695,7 +715,9 @@ exports.main_handler = async (event, context) => {
       zdMerged.forEach((w) => say(`    自动: ${windowText(w, mp.id)}`));
       await sleep(800);
     }
-    const payload = { total, byMp, at: new Date().toISOString() };
+    // sync 字段：本次同步的完备性信息（2026-10-22 波次1）——消费方（本机 --quick / Worker）
+    // 据此判断「这份标记能不能信」：at 是今天 ≠ 抓全；须同时 okCount==监测点总数 且 failCount==0。
+    const payload = { total, byMp, at: new Date().toISOString(), sync: { okCount, failCount, mpsTotal: mps.length, perMp: { ...perMp } } };
     if (dry) { say(`[dry] marks:${date} = ${JSON.stringify(payload)}`); continue; }
     try {
       await putKV(acc, ns, token, `marks:${date}`, JSON.stringify(payload));

@@ -48,7 +48,9 @@
                      ├──────────────────────────────────────────┤
                      │ ② 企业端在线监控平台（仅境内可达）          │
                      │    分钟级自动标记 + 人工填报标记            │
-                     │    ↳ 由境内云函数每天 12:55 抓取 → 写 KV    │
+                     │    ↳ 由本机每天 14:58 抓取 → 写 KV          │
+                     │    （cookie 失效时自动登录续期；            │
+                     │      历史：阿里云 FC / 腾讯云 SCF，已停用）   │
                      │    ↳ 或经 HTTPS 中继 relay（可选）         │
                      ├──────────────────────────────────────────┤
                      │ ③ 企业端直连兜底（①②全挂时才走）           │
@@ -73,7 +75,7 @@
 | **就绪门控** | 先调平台的 `begin-end-time` 接口确认 D-1 数据已发布；未发布返回 `not_ready`，顺延到下一整点重试 |
 | **KV 去重** | 推送成功才写去重键，当天 6 次触发只推一次；未推送/失败不写，下一整点自然重试 |
 | **标记多源融合** | 分钟级 KV 标记**按监测点覆盖**公开版小时级标记；来源会如实标注（`kv`/`public`/`kv+public`/`relay`），便于核对 |
-| **看门狗** | Worker 每天 13:05 后自检 KV 里是否有今天写入的标记——云函数欠费/冻结会静默失效，看门狗直接 Bark 告警 |
+| **看门狗** | Worker 每天 13:05 后自检 KV 里是否有今天写入的标记；同步中断告警已于 2026-10-22 关闭（云函数停用、改本机同步），自检结果仍写入 `last-watchdog` 供排查 |
 
 **判定与文案规则**（`buildText`，回归测试 27 例覆盖）：
 
@@ -87,20 +89,20 @@
 
 ```
 cloudflare-envsc/
-├── src/index.js            # Worker 主程序：取数、判定、文案、推送、看门狗（单文件无构建）
+├── config/
+│   └── project.json        # 业务配置（唯一事实来源）：排除点/公司名/阈值/推送窗口
+├── src/index.js            # Worker 主程序：取数、判定、文案、推送、看门狗
 ├── wrangler.toml           # Worker 配置：cron、vars、KV 绑定
 ├── tools/
-│   ├── scf-marks-sync/     # 标记同步云函数（腾讯云 SCF / 阿里云 FC 一份代码通用）
-│   ├── fc-deploy.py        # 云函数一键部署（阿里云 FC）
-│   ├── rotate-aliyun-key.py# 阿里云 AccessKey 轮换辅助
-│   ├── _aliyun_env.py      # 凭据统一加载（环境变量优先，其次 tools/.env.aliyun）
+│   ├── scf-marks-sync/     # 标记同步核心（云函数/本机共用同一份代码）
+│   ├── local-sync/         # 本机兜底同步：定时入口 + 企业端自动登录续期 + 日志
 │   ├── push-now.mjs        # 本地补推某一天（读取 KV 快照）
 │   ├── kv-read.py          # 读取/检查 KV 内容
 │   ├── buildtext-test.mjs  # 推送文案回归测试（27 例）
 │   ├── merge-test.mjs      # 标记合并回归测试（28 例）
 │   ├── watchdog-test.mjs   # 看门狗回归测试
 │   └── dump-*.mjs          # 各数据接口裸抓诊断脚本
-├── relay/                  # 企业端 HTTP → HTTPS 中继（fly.io/Render/Docker，带鉴权）
+├── relay/                  # 企业端 HTTP → HTTPS 中继（fly.io/Render/Docker，带鉴权，可选）
 └── docs/                   # 上游接口说明文档
 ```
 
@@ -112,8 +114,8 @@ cloudflare-envsc/
 - 一个 Cloudflare 账号（免费版即可）；
 - iOS 设备安装 [Bark](https://apps.apple.com/app/bark-customed-notifications/id1403753865)（推送通道）；
 - 可选：[Resend](https://resend.com) 账号（邮件兜底）；
-- 可选但推荐：阿里云函数计算 FC 或腾讯云 SCF 账号（分钟级标记抓取用，免费额度充足）；
-- 企业端平台的会话 cookie（用于抓取分钟级标记，向平台管理方申请账号后浏览器登录取得）。
+- 本机（Windows）一台，能访问企业端平台（分钟级标记抓取用；历史方案为云函数，已停用）；
+- 企业端平台的账号密码（用于抓取分钟级标记 + 自动登录续期，向平台管理方申请）。
 
 ### 1. 部署 Worker（约 3 分钟）
 
@@ -132,27 +134,31 @@ npx wrangler secret put BARK_KEY            # Bark 设备 key（必填）
 npx wrangler deploy
 ```
 
-### 2.（推荐）部署标记同步云函数
+### 2.（推荐）配置本机标记同步
 
-没有这一步也能跑——Worker 会退化为公开平台的小时级标记；要分钟级起止时间和人工填报标记，就部署云函数：
+没有这一步也能跑——Worker 会退化为公开平台的小时级标记；要分钟级起止时间和人工填报标记，就在一台能访问企业端的本机上部署同步脚本（详见 [tools/local-sync/README.md](tools/local-sync/README.md)）：
 
 ```bash
-cd tools
-export ALIBABA_CLOUD_ACCESS_KEY_ID=...
-export ALIBABA_CLOUD_ACCESS_KEY_SECRET=...
-export ALIYUN_ACCOUNT_ID=<阿里云主账号 UID>   # FC 3.0 接入地址必须带 UID
-
-FENV_CNEMC_COOKIE='jointframe.cluster.sessionid=xxx' \
-FENV_CF_ACCOUNT_ID=<Cloudflare 账号 ID> \
-FENV_CF_KV_NAMESPACE_ID=<第 1 步的 KV id> \
-FENV_CF_API_TOKEN=<有 KV 写权限的 API Token> \
-FENV_BARK_KEY=<同第 1 步> \
-FENV_CNEMC_PSID=654000000031 FENV_DAYS=2 \
-python fc-deploy.py                          # 建/更新函数 + 定时触发器（12:55）
-python fc-deploy.py --invoke '{"dry":true}'  # 试跑一次（不写 KV）
+cd tools/local-sync
+cp local-config.example.json local-config.json   # 填入企业端账号、Cloudflare KV 凭据、Bark key
+npm --prefix auto-login install puppeteer-core   # 自动登录续期依赖
+node run_scf_local.cjs 2026-10-21 2 --force      # 手动试跑一次
 ```
 
-细节与踩坑记录见 [tools/deploy-aliyun-fc.md](tools/deploy-aliyun-fc.md)。云函数只做：定时 12:55 抓取 D-1/D-2 标记 → 写 Cloudflare KV（键 `marks:<YYYY-MM-DD>`）；cookie 失效时 Bark 告警（KV 幂等，当天只告警一次）。
+然后注册 Windows 计划任务（每天 **14:58** 正式同步，早于 15:00 推送；另加「登录时」触发用于开机补缺）：
+
+```powershell
+# 任务1：每天 14:58 正式同步（--quick 按完备性判定，数据不全自动补抓）
+$a = New-ScheduledTaskAction -Execute "node.exe" -Argument '"<repo>\tools\local-sync\run_scf_local.cjs" --quick' -WorkingDirectory "<repo>"
+$t1 = New-ScheduledTaskTrigger -Daily -At "14:58:00"
+Register-ScheduledTask -TaskName "ENVSC-SCF-Local-Sync" -Action $a -Trigger $t1 -Force
+# 任务2：登录时补缺口（--if-missing 只补缺，不覆盖正式档的结果）
+$a2 = New-ScheduledTaskAction -Execute "node.exe" -Argument '"<repo>\tools\local-sync\run_scf_local.cjs" --if-missing' -WorkingDirectory "<repo>"
+$t2 = New-ScheduledTaskTrigger -AtLogOn
+Register-ScheduledTask -TaskName "ENVSC-SCF-Local-Sync-Logon" -Action $a2 -Trigger $t2 -Force
+```
+
+同步逻辑：先校验 cookie（无效则 puppeteer 自动登录续期）→ 抓 D-1 各监测点标记 → 写 KV `marks:<YYYY-MM-DD>`（载荷带 `sync` 完备性信息）；失败 Bark 告警（每天一次）。云函数时代的环境变量方式（`CNEMC_COOKIE`/`CF_ACCOUNT_ID`/…）在本机由 `local-config.json` 取代。
 
 ### 3.（可选）启用邮件兜底
 
@@ -210,13 +216,13 @@ npx wrangler tail                            # 观察定时执行的实时日志
 | `MARKS_PROXY_URL` | — | 中继地址（可选） |
 | `MARKS_PROXY_TOKEN` | — | 中继鉴权令牌（须与中继 `RELAY_TOKEN` 一致） |
 
-**云函数环境变量**（`FENV_*` 传给 `fc-deploy.py`）：`CNEMC_COOKIE`、`CF_ACCOUNT_ID`、`CF_KV_NAMESPACE_ID`、`CF_API_TOKEN`、`BARK_KEY`、`CNEMC_PSID`、`DAYS`（回抓天数，默认 2）。
+**本机同步配置**（`tools/local-sync/local-config.json`，不入仓库）：`cnemc.account/password`（企业端账号，自动登录续期用）、`cnemc.cookie`（可选，初始会话）、`cloudflare.accountId/kvNamespaceId/apiToken`（KV 读写）、`bark.key`（失败告警）。
 
 ## 定时与去重
 
 `wrangler.toml` 中的 cron 是 **UTC 时区**：`0 7-12 * * *` = **北京时间 15:00–20:00 整点**，共 6 次。
 
-- 平台数据通常 13:00 后陆续就绪（云函数 12:55 先抓标记），15:00 起步留 2 小时缓冲；
+- 平台数据通常 13:00 后陆续就绪（本机 14:58 先抓标记，且载荷带完备性检查——不全会自动补抓），15:00 起步留缓冲；
 - 6 个触发点 = 最多 6 次重试机会（`not_ready` / 失败自动顺延）；
 - 推送成功写 KV 去重键，当天不会重复打扰；全达标（仅标题）同样写去重。
 
@@ -235,14 +241,7 @@ node tools/watchdog-test.mjs       # 看门狗逻辑
 node tools/push-now.mjs 2026-10-07      # 用 KV 快照补推/预览某天（BARK_KEY=xxx KV_FILE=... 前缀）
 "C:/.../python.exe" tools/kv-read.py --list "marks:2026-10"   # 查看 KV 键（凭据自动加载）
 node tools/dump-puball.mjs              # 裸抓公开平台各接口，诊断数据源
-```
-
-换阿里云 AccessKey（云函数部署凭据）：
-
-```bash
-python tools/rotate-aliyun-key.py --set <新AK> <新SK>   # 写入 tools/.env.aliyun 并自动验证
-python tools/kv-read.py --list                          # 实际链路复验
-# 然后去阿里云控制台禁用旧 AccessKey
+node tools/local-sync/run_scf_local.cjs --quick    # 本机立即同步 D-1（先查完备性）
 ```
 
 ## 免责声明

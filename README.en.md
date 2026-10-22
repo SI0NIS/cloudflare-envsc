@@ -52,8 +52,9 @@ Push channels: **Bark as primary** (free iOS app over public HTTPS); **email as 
                      │ ② Enterprise monitoring platform         │
                      │    (reachable only from mainland China)   │
                      │    Minute-level auto marks + manual marks │
-                     │    ↳ Cloud function scrapes daily 12:55   │
-                     │      and writes to Cloudflare KV          │
+                     │    ↳ Scraped daily 14:58 by a local PC    │
+                     │      (auto-login cookie refresh; legacy:  │
+                     │      Alibaba FC / Tencent SCF, retired)   │
                      │    ↳ or via HTTPS relay (optional)        │
                      ├──────────────────────────────────────────┤
                      │ ③ Direct enterprise fallback (last resort)│
@@ -78,7 +79,7 @@ Core mechanisms:
 | **Readiness gate** | Queries the platform's `begin-end-time` API first to confirm D-1 data is published; otherwise returns `not_ready` and defers to the next hourly run |
 | **KV dedup** | Writes the dedup key only after a successful push, so the 6 daily runs result in exactly one push; failures don't write the key, so the next hour naturally retries |
 | **Multi-source mark merging** | Minute-level KV marks **override** hour-level public marks per monitoring point; the source is truthfully recorded (`kv`/`public`/`kv+public`/`relay`) for easy auditing |
-| **Watchdog** | After 13:05 CST the Worker self-checks whether today's marks landed in KV — an arrears-frozen cloud function fails silently, and the watchdog raises a Bark alert |
+| **Watchdog** | After 13:05 CST the Worker self-checks whether today's marks landed in KV; the sync-interruption alert was turned off on 2026-10-22 (cloud functions retired in favor of local sync) — self-check results are still written to `last-watchdog` for troubleshooting |
 
 **Judging & message rules** (`buildText`, covered by 27 regression tests):
 
@@ -92,20 +93,20 @@ Core mechanisms:
 
 ```
 cloudflare-envsc/
-├── src/index.js            # Worker main: fetch, judge, compose, push, watchdog (single file, no build step)
+├── config/
+│   └── project.json        # Business config (single source of truth): exclusions, company, thresholds, push window
+├── src/index.js            # Worker main: fetch, judge, compose, push, watchdog
 ├── wrangler.toml           # Worker config: cron, vars, KV binding
 ├── tools/
-│   ├── scf-marks-sync/     # Mark-sync cloud function (one codebase for Tencent SCF / Alibaba FC)
-│   ├── fc-deploy.py        # One-command function deploy (Alibaba FC)
-│   ├── rotate-aliyun-key.py# Alibaba Cloud AccessKey rotation helper
-│   ├── _aliyun_env.py      # Unified credential loading (env vars first, then tools/.env.aliyun)
+│   ├── scf-marks-sync/     # Mark-sync core (same codebase for cloud functions and local runs)
+│   ├── local-sync/         # Local fallback sync: scheduled runner + enterprise auto-login + logging
 │   ├── push-now.mjs        # Local re-push / preview for a given date (reads KV snapshot)
 │   ├── kv-read.py          # Read/inspect KV contents
 │   ├── buildtext-test.mjs  # Message-format regression tests (27 cases)
 │   ├── merge-test.mjs      # Mark-merging regression tests (28 cases)
 │   ├── watchdog-test.mjs   # Watchdog regression tests
 │   └── dump-*.mjs          # Raw-API diagnostic scripts for each data source
-├── relay/                  # Enterprise HTTP → HTTPS relay (fly.io/Render/Docker, authenticated)
+├── relay/                  # Enterprise HTTP → HTTPS relay (fly.io/Render/Docker, authenticated, optional)
 └── docs/                   # Upstream API documentation
 ```
 
@@ -117,8 +118,8 @@ cloudflare-envsc/
 - A Cloudflare account (free tier is enough);
 - [Bark](https://apps.apple.com/app/bark-customed-notifications/id1403753865) installed on an iOS device (push channel);
 - Optional: a [Resend](https://resend.com) account (email fallback);
-- Optional but recommended: an Alibaba Cloud Function Compute (FC) or Tencent Cloud SCF account for minute-level mark scraping (generous free tiers);
-- A session cookie for the enterprise platform (obtained by logging in via browser with an account granted by the platform operator; used to scrape minute-level marks).
+- A (Windows) PC that can reach the enterprise platform, for minute-level mark scraping (legacy: cloud functions, retired);
+- Enterprise-platform account credentials (granted by the platform operator; used for scraping and auto-login cookie refresh).
 
 ### 1. Deploy the Worker (~3 minutes)
 
@@ -138,27 +139,31 @@ npx wrangler secret put BARK_KEY            # Bark device key (required)
 npx wrangler deploy
 ```
 
-### 2. (Recommended) Deploy the mark-sync cloud function
+### 2. (Recommended) Set up the local mark sync
 
-Everything works without this step — the Worker degrades to the public platform's hour-level marks. For minute-level start/end times and manual filings, deploy the cloud function:
+Everything works without this step — the Worker degrades to the public platform's hour-level marks. For minute-level start/end times and manual filings, run the sync scripts on a PC that can reach the enterprise platform (see [tools/local-sync/README.md](tools/local-sync/README.md)):
 
 ```bash
-cd tools
-export ALIBABA_CLOUD_ACCESS_KEY_ID=...
-export ALIBABA_CLOUD_ACCESS_KEY_SECRET=...
-export ALIYUN_ACCOUNT_ID=<Alibaba main-account UID>   # FC 3.0 endpoints require the UID
-
-FENV_CNEMC_COOKIE='jointframe.cluster.sessionid=xxx' \
-FENV_CF_ACCOUNT_ID=<Cloudflare account ID> \
-FENV_CF_KV_NAMESPACE_ID=<KV id from step 1> \
-FENV_CF_API_TOKEN=<API token with KV write permission> \
-FENV_BARK_KEY=<same as step 1> \
-FENV_CNEMC_PSID=654000000031 FENV_DAYS=2 \
-python fc-deploy.py                          # create/update the function + 12:55 trigger
-python fc-deploy.py --invoke '{"dry":true}'  # dry run (doesn't write KV)
+cd tools/local-sync
+cp local-config.example.json local-config.json   # fill in enterprise account, Cloudflare KV creds, Bark key
+npm --prefix auto-login install puppeteer-core   # auto-login dependency
+node run_scf_local.cjs 2026-10-21 2 --force      # manual test run
 ```
 
-See [tools/deploy-aliyun-fc.md](tools/deploy-aliyun-fc.md) for details and pitfalls. The function does one thing: at 12:55 daily it scrapes D-1/D-2 marks and writes them to Cloudflare KV (keys `marks:<YYYY-MM-DD>`); on cookie expiry it raises a Bark alert (KV-idempotent, at most once per day).
+Then register the Windows scheduled task (daily **14:58**, ahead of the 15:00 push; plus an at-logon trigger to fill gaps after boot):
+
+```powershell
+# Task 1: daily sync at 14:58 (--quick completeness check; incomplete data triggers a re-scrape)
+$a = New-ScheduledTaskAction -Execute "node.exe" -Argument '"<repo>\tools\local-sync\run_scf_local.cjs" --quick' -WorkingDirectory "<repo>"
+$t1 = New-ScheduledTaskTrigger -Daily -At "14:58:00"
+Register-ScheduledTask -TaskName "ENVSC-SCF-Local-Sync" -Action $a -Trigger $t1 -Force
+# Task 2: fill gaps at logon (--if-missing never overwrites the official 14:58 run)
+$a2 = New-ScheduledTaskAction -Execute "node.exe" -Argument '"<repo>\tools\local-sync\run_scf_local.cjs" --if-missing' -WorkingDirectory "<repo>"
+$t2 = New-ScheduledTaskTrigger -AtLogOn
+Register-ScheduledTask -TaskName "ENVSC-SCF-Local-Sync-Logon" -Action $a2 -Trigger $t2 -Force
+```
+
+Sync logic: validate the cookie (on failure, refresh via puppeteer auto-login) → scrape D-1 marks per monitoring point → write KV `marks:<YYYY-MM-DD>` (payload carries a `sync` completeness section); on failure, one Bark alert per day. The cloud-function era env vars (`CNEMC_COOKIE`/`CF_ACCOUNT_ID`/…) are replaced by `tools/local-sync/local-config.json` on the local setup.
 
 ### 3. (Optional) Enable the email fallback
 
@@ -216,13 +221,13 @@ Meaning of the returned `action`:
 | `MARKS_PROXY_URL` | — | Relay URL (optional) |
 | `MARKS_PROXY_TOKEN` | — | Relay auth token (must equal the relay's `RELAY_TOKEN`) |
 
-**Cloud-function environment variables** (passed to `fc-deploy.py` as `FENV_*`): `CNEMC_COOKIE`, `CF_ACCOUNT_ID`, `CF_KV_NAMESPACE_ID`, `CF_API_TOKEN`, `BARK_KEY`, `CNEMC_PSID`, `DAYS` (look-back days, default 2).
+**Local sync config** (`tools/local-sync/local-config.json`, not in the repo): `cnemc.account/password` (enterprise credentials for auto-login refresh), `cnemc.cookie` (optional initial session), `cloudflare.accountId/kvNamespaceId/apiToken` (KV read/write), `bark.key` (failure alerts).
 
 ## Schedule & Dedup
 
 The cron in `wrangler.toml` is in **UTC**: `0 7-12 * * *` = **15:00–20:00 CST on the hour**, 6 runs a day.
 
-- Platform data usually becomes ready after ~13:00 CST (the cloud function scrapes marks at 12:55 first); starting at 15:00 leaves a 2-hour buffer;
+- Platform data usually becomes ready after ~13:00 CST (the local sync scrapes marks at 14:58 first, with a completeness check in the payload — incomplete data triggers a re-scrape); starting at 15:00 leaves a buffer;
 - 6 trigger points = up to 6 retries (`not_ready` / failures defer automatically);
 - A successful push writes the KV dedup key, so you're disturbed at most once a day; title-only (all-compliant) days write it too.
 
@@ -242,14 +247,7 @@ node tools/push-now.mjs 2026-10-07      # re-push/preview a date from its KV sna
                                         # (prefix with BARK_KEY=xxx KV_FILE=...)
 "C:/.../python.exe" tools/kv-read.py --list "marks:2026-10"   # inspect KV keys (auto-loads credentials)
 node tools/dump-puball.mjs              # raw-scrape the public APIs to diagnose sources
-```
-
-Rotating the Alibaba Cloud AccessKey (used for function deployment):
-
-```bash
-python tools/rotate-aliyun-key.py --set <new-AK> <new-SK>   # writes tools/.env.aliyun and verifies
-python tools/kv-read.py --list                              # end-to-end re-check
-# then disable the old AccessKey in the Alibaba console
+node tools/local-sync/run_scf_local.cjs --quick    # sync D-1 right now (checks completeness first)
 ```
 
 ## Disclaimer

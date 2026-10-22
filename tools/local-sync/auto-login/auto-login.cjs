@@ -34,15 +34,9 @@ const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,
 const puppeteer = require('puppeteer-core');
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const todayBJ = new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 10);
-const LOG_DIR = path.join(RUNTIME, 'logs');
-fs.mkdirSync(LOG_DIR, { recursive: true });
-const logPath = path.join(LOG_DIR, `auto-login-${todayBJ}.log`);
-function log(msg) {
-  const line = `[${new Date().toISOString()}] ${msg}`;
-  console.log(line);
-  try { fs.appendFileSync(logPath, line + '\n', 'utf8'); } catch (e) { /* ignore */ }
-}
+// 共享日志（含 1MB 轮转，保留 3 份历史）
+const { createLogger } = require('../lib/log');
+const { log } = createLogger('auto-login', path.join(RUNTIME, 'logs'));
 
 async function validateCookie(cookie) {
   try {
