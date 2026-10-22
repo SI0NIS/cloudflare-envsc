@@ -1,4 +1,5 @@
 // 看门狗单元测试：用假 KV + 冻结时钟覆盖 6 种情形，全程不发真实网络请求。
+// 2026-10-22 起：云函数停用，看门狗不再推送告警（状态= muted），但自检结果仍写 last-watchdog。
 // 运行：node tools/watchdog-test.mjs
 const TZ = 8 * 3600 * 1000;
 const ymd = (d) => new Date(d.getTime() + TZ).toISOString().slice(0, 10);
@@ -61,8 +62,8 @@ function check(name, cond, detail) {
   const kv = fakeKV();
   const r = await watchdog({ ENVSC_KV: kv, BARK_KEY: 'stub' });
   f.restore();
-  check('② 缺 marks:<D-1> → 告警', r.watchdog === 'alerted', r);
-  check('② 写入幂等键 wd:<today>', !!kv.store[`wd:${today}`], Object.keys(kv.store));
+  check('② 缺 marks:<D-1> → 静默（不推送，2026-10-22 起）', r.watchdog === 'muted', r);
+  check('② 不再写幂等键 wd:<today>', !kv.store[`wd:${today}`], Object.keys(kv.store));
 }
 
 {
@@ -80,7 +81,7 @@ function check(name, cond, detail) {
   const kv = fakeKV({ [`marks:${d1}`]: JSON.stringify({ total: 0, byMp: {}, at: new Date(f.ms - 86400000).toISOString() }) });
   const r = await watchdog({ ENVSC_KV: kv, BARK_KEY: 'stub' });
   f.restore();
-  check('④ 时间戳非今日 → 告警', r.watchdog === 'alerted', r);
+  check('④ 时间戳非今日 → 静默（不推送）', r.watchdog === 'muted', r);
 }
 
 {

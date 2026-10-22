@@ -686,8 +686,8 @@ async function run(env) {
 // 背景：阿里云欠费会**立即**冻结函数（403 "Current user is in debt"），12:55 的定时同步会
 // 静默失效——不报错、不推送，第二天才发现标记全丢。而费用中心的「可用额度预警」没有公开
 // OpenAPI（SDK 里只有给分销子账号用的 SetResellerUserAlarmThreshold），代设不了。
-// 于是用 Cloudflare 自己的 Cron 做反向自检：只看 KV 里有没有「今天写入的 marks:<D-1>」，
-// 完全不依赖阿里云任何权限。云函数挂了 →  Bark 告警。
+// 于是用 Cloudflare 自己的 Cron 做反向自检：只看 KV 里有没有「今天写入的 marks:<D-1>」。
+// 2026-10-22 起：云函数停用、改本机 14:58 同步 → 自检保留（结果写 last-watchdog），但**不再推送告警**。
 async function watchdog(env) {
   const kv = env.ENVSC_KV;
   if (!kv) return { watchdog: 'skip', why: 'ENVSC_KV 未绑定' };
@@ -723,13 +723,9 @@ async function watchdog(env) {
   }
   if (!why) return { watchdog: 'ok', day, today, why: '今日同步已落库' };
 
-  const title = `⚠️ 同步中断 ${day.replace(/-/g, '')}`;
-  const body = `${why}。常见原因：① 阿里云欠费冻结（403 in debt，欠 2 分钱也停）；`
-    + '② 企业端 cookie 失效；③ 函数异常。请查阿里云账户余额 + 函数 envsc-marks-sync。';
-  let bark = { channel: 'bark', ok: false, error: 'BARK_KEY 未配置' };
-  if (env.BARK_KEY) bark = await pushBark(env.BARK_KEY, title, body, 'timeSensitive');
-  try { await kv.put(`wd:${today}`, now.toISOString()); } catch (e) { /* 幂等标记失败不影响告警本身 */ }
-  return { watchdog: 'alerted', day, today, why, bark };
+  // 2026-10-22 用户要求：云函数已停用（改为本机 14:58 同步），停止推送「同步中断」告警。
+  // 自检结果仍写入 last-watchdog（KV）供排查，但不再发 Bark —— 避免每日误报/重复告警。
+  return { watchdog: 'muted', day, today, why, note: '同步中断告警已关闭（云函数停用，改本机同步）' };
 }
 
 export { buildText, markText, fetchMarks, watchdog };
