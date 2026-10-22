@@ -143,6 +143,18 @@ async function kvGet(key) {
   return JSON.parse(await r.text());
 }
 
+// 波次4：任务状态写 KV（供 Worker/排查读取，任务自身是否正常一目了然，不再靠人肉看 LastResult）
+async function kvPutStatus(obj) {
+  try {
+    const r = await fetch(`${KV_BASE}/${encodeURIComponent('local-task:status')}`, {
+      method: 'PUT',
+      headers: { Authorization: `Bearer ${CFG_CF.apiToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(obj),
+    });
+    return r.ok;
+  } catch (e) { return false; }
+}
+
 // 完备性判定（2026-10-22 波次1）：at 是今天 ≠ 抓全。
 // 新格式载荷（带 sync）：failCount==0 且 okCount==mpsTotal(>0) 才算可信；
 // 旧格式载荷（无 sync）：保持旧语义（at 是今天即可信）。
@@ -172,13 +184,18 @@ function payloadComplete(m) {
   } catch (e) {
     log(`KV 预检查失败（不阻断）：${e.message}`);
   }
-  if (skip && !force) { log(`=== 跳过（${skip}）===`); process.exit(0); }
+  if (skip && !force) {
+    log(`=== 跳过（${skip}）===`);
+    await kvPutStatus({ at: new Date().toISOString(), date, result: 'skip', reason: skip });
+    process.exit(0);
+  }
   if (skip && force) log('(--force 忽略跳过检查)');
 
   const cookie = await ensureCookie();
   if (!cookie) {
     await alertOnceToday('envsc 本机同步失败', `目标日 ${date}：企业端 cookie 无效且自动登录续期失败，请检查 local-config.json / 手动更新 runtime/cnemc-cookie.txt`);
     log('=== 失败（cookie 不可用）===');
+    await kvPutStatus({ at: new Date().toISOString(), date, result: 'fail', reason: 'cookie 不可用（自动登录续期失败）' });
     process.exit(1);
   }
 
@@ -199,10 +216,12 @@ function payloadComplete(m) {
       await alertOnceToday('envsc 本机同步失败', `目标日 ${date} 同步失败：${detail}\n请检查 runtime/cnemc-cookie.txt 与网络`);
     }
     log('=== 完成 ===');
+    await kvPutStatus({ at: new Date().toISOString(), date, result: r.ok ? 'ok' : 'fail', written: r.written, okCount: r.okCount, failCount: r.failCount });
     process.exit(r.ok ? 0 : 1);
   } catch (e) {
     log(`FATAL: ${e && (e.stack || e.message || e)}`);
     await alertOnceToday('envsc 本机同步异常', `目标日 ${date} 执行异常：${String(e && (e.message || e)).slice(0, 200)}`);
+    await kvPutStatus({ at: new Date().toISOString(), date, result: 'exception', error: String(e && (e.message || e)).slice(0, 200) });
     process.exit(1);
   }
 })();

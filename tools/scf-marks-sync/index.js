@@ -257,6 +257,7 @@ function mergeContinuous(windows, rowMinutes, minMinutes) {
 // 在总排口是「氯气」；若用一张全局 Map 会被后加载的点覆盖、导致串名。
 // 因此改为**按监测点隔离**：MP_FACTOR_NAMES[mpId] = Map(code → name)。
 const MP_FACTOR_NAMES = new Map();       // mpId -> Map(code -> name)
+const FACTOR_LOADED = new Map();         // mpId -> true（本实例内已取到非空因子名，后续日期不再重复抓取，2026-10-22 波次4）
 const PARAM_CODE = /^[SB]\d{2}$/i;       // 工况参数编码（流量/流速/温度/湿度/压力/氧含量…）
 const FACTOR_NAMES = new Map();          // 兼容旧测试：最近一次加载的点
 // 拉取某监测点某天的「因子编号 → 名称」表（公开平台；必须带 date，当天无数据时接口返回空 list）
@@ -286,6 +287,15 @@ async function fetchFactorNamesOfDay(mpId, day) {
 // 导致推送缺因子名。因子编号→名称 与日期无关，故目标日为空时依次回退前一/二天。
 async function loadFactorNames(mpId, dateStr) {
   const key = String(mpId);
+  // 波次4：因子编号→名称与日期无关，同一实例内已取到非空结果就不再重复抓取（days=2 时省一半请求）。
+  if (FACTOR_LOADED.get(key)) {
+    const cached = MP_FACTOR_NAMES.get(key);
+    if (cached && cached.size) {
+      FACTOR_NAMES.clear();
+      for (const [k, v] of cached) FACTOR_NAMES.set(k, v);
+      return cached.size;
+    }
+  }
   let map = new Map();
   try {
     const day = dateStr || ymd(new Date());
@@ -305,6 +315,7 @@ async function loadFactorNames(mpId, dateStr) {
     }
     MP_FACTOR_NAMES.set(key, map);
     if (map.size) {
+      FACTOR_LOADED.set(key, true);
       FACTOR_NAMES.clear();
       for (const [k, v] of map) FACTOR_NAMES.set(k, v);
     } else {
@@ -723,39 +734,54 @@ exports.main_handler = async (event, context) => {
     } catch (e) {
       say(`SYNC_WARN ${date} sign/qy/list 失败：${e.message}（人工标记回退到数据行扫描）`);
     }
-    for (const mp of mps) {
+    // 波次4：并发 2 路抓取（原串行 + sleep(800)/点，5 点约 40~60s → 并发后 ~20s，为 14:58 紧贴 15:00 留余量）
+    const processMp = async (mp) => {
+      const logs = [];
       const rm = rowMinutesOf(mp);
-      let rows;
-      try { rows = await getRows(cookie, psid, industry, mp, date); okCount++; perMp[mp.name] = 'ok'; }
-      catch (e) { say(`SYNC_WARN ${date} ${mp.name} 抓取失败：${e.message}`); failCount++; perMp[mp.name] = 'fail'; await sleep(1000); continue; }
-      const rg = extractWindows(rows, 'rg_flag_', rm);
-      // 自动标记：规则A = 连续标记总时长 ≥阈值（整链保留，含缺 1 分钟容错）；
-      //             规则B = 单个自然小时内累计覆盖 ≥阈值也保留（不要求连续，2026-10-19 用户要求）
-      // 阈值来自 config/project.json（云端单文件部署时回退默认 15）。
-      const zdAll = extractWindows(rows, 'zd_flag_', rm);
-      const zdKept = mergeContinuous(zdAll, rm, PROJECT.thresholds.autoMarkMinMinutes);
-      const zdHour = keepByHourCoverage(zdAll, rm, PROJECT.thresholds.autoMarkMinPerHour);
-      const zd = [...new Set([...zdKept, ...zdHour])].sort((a, b) => (a.start < b.start ? -1 : a.start > b.start ? 1 : 0));
-      const qyList = qyMap.get(mp.name) || null;
-      // 人工标记：填报记录（精确）> 数据行 rg_flag_ 扫描（兜底）
-      const manualText = (qyList && qyList.length) ? qyText(qyList)
-        : (rg.length ? rg.map((w) => windowText(w, mp.id)).join('；') : null);
-      const zdMerged = zd.length ? mergeSameLabelSegs(zd, mp.id) : [];
-      const autoText = zdMerged.length ? segsText(zdMerged, mp.id) : null;
-      const manualN = (qyList && qyList.length) ? qyList.length : rg.length;
-      // v2 结构化段（与上面的 v1 文本同一数据源、同一格式规则）
-      const manualV2 = (qyList && qyList.length) ? { segs: qyList.map(qySegV2) }
-        : (rg.length ? { noGroup: true, segs: rg.map((w) => manualRgSegV2(w, mp.id)) } : null);
-      const autoV2segs = zdMerged.map(autoSegV2);
-      if (manualText || autoText) {
-        byMp[mp.name] = { manual: manualText, auto: autoText };
-        total += manualN;
-        pointsV2[mp.name] = { manual: manualV2, auto: { segs: autoV2segs } };
+      try {
+        const rows = await getRows(cookie, psid, industry, mp, date);
+        const rg = extractWindows(rows, 'rg_flag_', rm);
+        // 自动标记：规则A = 连续标记总时长 ≥阈值（整链保留，含缺 1 分钟容错）；
+        //             规则B = 单个自然小时内累计覆盖 ≥阈值也保留（不要求连续，2026-10-19 用户要求）
+        // 阈值来自 config/project.json（云端单文件部署时回退默认 15）。
+        const zdAll = extractWindows(rows, 'zd_flag_', rm);
+        const zdKept = mergeContinuous(zdAll, rm, PROJECT.thresholds.autoMarkMinMinutes);
+        const zdHour = keepByHourCoverage(zdAll, rm, PROJECT.thresholds.autoMarkMinPerHour);
+        const zd = [...new Set([...zdKept, ...zdHour])].sort((a, b) => (a.start < b.start ? -1 : a.start > b.start ? 1 : 0));
+        const qyList = qyMap.get(mp.name) || null;
+        // 人工标记：填报记录（精确）> 数据行 rg_flag_ 扫描（兜底）
+        const manualText = (qyList && qyList.length) ? qyText(qyList)
+          : (rg.length ? rg.map((w) => windowText(w, mp.id)).join('；') : null);
+        const zdMerged = zd.length ? mergeSameLabelSegs(zd, mp.id) : [];
+        const autoText = zdMerged.length ? segsText(zdMerged, mp.id) : null;
+        const manualN = (qyList && qyList.length) ? qyList.length : rg.length;
+        // v2 结构化段（与上面的 v1 文本同一数据源、同一格式规则）
+        const manualV2 = (qyList && qyList.length) ? { segs: qyList.map(qySegV2) }
+          : (rg.length ? { noGroup: true, segs: rg.map((w) => manualRgSegV2(w, mp.id)) } : null);
+        const autoV2segs = zdMerged.map(autoSegV2);
+        logs.push(`[${date}] ${mp.name}(mpType=${mp.mpType},${rm >= 60 ? '小时' : '分钟'}) 行=${rows.length} 人工=${manualN}${qyList && qyList.length ? '(qy)' : ''} 自动=${zd.length}`);
+        if (manualText) logs.push(`    人工: ${manualText}`);
+        zdMerged.forEach((w) => logs.push(`    自动: ${windowText(w, mp.id)}`));
+        return { name: mp.name, ok: true, logs, manualText, autoText, manualV2, autoV2segs, manualN };
+      } catch (e) {
+        logs.push(`SYNC_WARN ${date} ${mp.name} 抓取失败：${e.message}`);
+        return { name: mp.name, ok: false, logs };
       }
-      say(`[${date}] ${mp.name}(mpType=${mp.mpType},${rm >= 60 ? '小时' : '分钟'}) 行=${rows.length} 人工=${manualN}${qyList && qyList.length ? '(qy)' : ''} 自动=${zd.length}`);
-      if (manualText) say(`    人工: ${manualText}`);
-      zdMerged.forEach((w) => say(`    自动: ${windowText(w, mp.id)}`));
-      await sleep(800);
+    };
+    const CONCURRENCY = 2;
+    for (let i = 0; i < mps.length; i += CONCURRENCY) {
+      const batch = mps.slice(i, i + CONCURRENCY);
+      const rs = await Promise.all(batch.map(processMp));
+      for (const r of rs) {
+        if (r.ok) { okCount++; perMp[r.name] = 'ok'; }
+        else { failCount++; perMp[r.name] = 'fail'; }
+        r.logs.forEach((l) => say(l));
+        if (r.ok && (r.manualText || r.autoText)) {
+          byMp[r.name] = { manual: r.manualText, auto: r.autoText };
+          total += r.manualN;
+          pointsV2[r.name] = { manual: r.manualV2, auto: { segs: r.autoV2segs } };
+        }
+      }
     }
     // sync 字段：本次同步的完备性信息（2026-10-22 波次1）——消费方（本机 --quick / Worker）
     // 据此判断「这份标记能不能信」：at 是今天 ≠ 抓全；须同时 okCount==监测点总数 且 failCount==0。
