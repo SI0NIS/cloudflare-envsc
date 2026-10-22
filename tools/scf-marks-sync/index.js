@@ -507,7 +507,40 @@ function keepByHourCoverage(windows, rowMinutes, minPerHour) {
   return [...keep];
 }
 
-exports._test = { mergeContinuous, mergeSameLabelSegs, extractWindows, windowText, segsText, FACTOR_NAMES, MP_FACTOR_NAMES, PARAM_CODE, qyText, factorNameOf, factorMapOf, keepByHourCoverage };
+exports._test = { mergeContinuous, mergeSameLabelSegs, extractWindows, windowText, segsText, FACTOR_NAMES, MP_FACTOR_NAMES, PARAM_CODE, qyText, factorNameOf, factorMapOf, keepByHourCoverage, autoSegV2, qySegV2, manualRgSegV2, segSpan };
+
+// ---------- marks v2 结构化载荷（2026-10-22 波次2：KV 文本协议 → 结构化契约） ----------
+// 段结构：{ factors:[], head, start:"HH:mm", end:"HH:mm", minutes:N }
+//   head 为最终展示文本头（label / label-detail / markLabel 规则在此一次定型），
+//   start/end/minutes 为最终展示值（与 v1 spanText/qyText 输出逐字节一致）。
+// 消费方（Worker）只做：结构化区间覆盖抑制 + 分组序列化，不再解析文本。
+function segSpan(w) { // 与 spanText 相同的时间计算，输出结构化三元组
+  const rm = w.rowMinutes || 1;
+  const st = toMs(w.start);
+  const ed = rm >= 60 ? st + w.n * 60000 : st + (w.n - 1) * 60000;
+  return { start: fmtHM(new Date(st)), end: fmtHM(new Date(ed)), minutes: w.n };
+}
+function autoSegV2(w) {
+  const span = segSpan(w);
+  if (w.markLabel) return { factors: w.label.split('/'), head: w.markLabel, ...span };
+  let d = w.detail || '';
+  const p = w.label + ' - ';
+  if (d.startsWith(p)) d = d.slice(p.length); else if (d === w.label) d = '';
+  return { factors: [], head: d ? `${w.label}-${d}` : w.label, ...span };
+}
+function qySegV2(w) {
+  const n = Math.max(1, Math.round((toMs(w.end) - toMs(w.start)) / 60000) + 1);
+  const head = w.detail && w.detail !== w.label ? `${w.label}-${w.detail}` : w.label;
+  return { factors: (w.factors || []).slice(), head, start: fmtHM(new Date(toMs(w.start))), end: fmtHM(new Date(toMs(w.end))), minutes: n };
+}
+function manualRgSegV2(w, mpId) { // rg 兜底：与 windowText 同款头部
+  const span = segSpan(w);
+  let d = w.detail || '';
+  const p = w.label + ' - ';
+  if (d.startsWith(p)) d = d.slice(p.length); else if (d === w.label) d = '';
+  const fn = factorNameOf(w, mpId);
+  return { factors: fn ? [fn] : [], head: d ? `${w.label}-${d}` : w.label, ...span };
+}
 
 exports.main_handler = async (event, context) => {
   const ev = event || {};
@@ -675,6 +708,7 @@ exports.main_handler = async (event, context) => {
   const perMp = {}; // 每个监测点当次抓取状态（供消费方做完备性检查）
   for (const date of dates) {
     const byMp = {}; let total = 0;
+    const pointsV2 = {}; // marks v2 结构化载荷（与 byMp 同条件写入）
     // 监测因子编号 → 名称（公开平台；**必须带 date**，当天无数据时接口返回空 list）
     FACTOR_NAMES.clear();
     for (const m of mps) { if (m.id) await loadFactorNames(m.id, date); }
@@ -709,7 +743,15 @@ exports.main_handler = async (event, context) => {
       const zdMerged = zd.length ? mergeSameLabelSegs(zd, mp.id) : [];
       const autoText = zdMerged.length ? segsText(zdMerged, mp.id) : null;
       const manualN = (qyList && qyList.length) ? qyList.length : rg.length;
-      if (manualText || autoText) { byMp[mp.name] = { manual: manualText, auto: autoText }; total += manualN; }
+      // v2 结构化段（与上面的 v1 文本同一数据源、同一格式规则）
+      const manualV2 = (qyList && qyList.length) ? { segs: qyList.map(qySegV2) }
+        : (rg.length ? { noGroup: true, segs: rg.map((w) => manualRgSegV2(w, mp.id)) } : null);
+      const autoV2segs = zdMerged.map(autoSegV2);
+      if (manualText || autoText) {
+        byMp[mp.name] = { manual: manualText, auto: autoText };
+        total += manualN;
+        pointsV2[mp.name] = { manual: manualV2, auto: { segs: autoV2segs } };
+      }
       say(`[${date}] ${mp.name}(mpType=${mp.mpType},${rm >= 60 ? '小时' : '分钟'}) 行=${rows.length} 人工=${manualN}${qyList && qyList.length ? '(qy)' : ''} 自动=${zd.length}`);
       if (manualText) say(`    人工: ${manualText}`);
       zdMerged.forEach((w) => say(`    自动: ${windowText(w, mp.id)}`));
@@ -718,7 +760,16 @@ exports.main_handler = async (event, context) => {
     // sync 字段：本次同步的完备性信息（2026-10-22 波次1）——消费方（本机 --quick / Worker）
     // 据此判断「这份标记能不能信」：at 是今天 ≠ 抓全；须同时 okCount==监测点总数 且 failCount==0。
     const payload = { total, byMp, at: new Date().toISOString(), sync: { okCount, failCount, mpsTotal: mps.length, perMp: { ...perMp } } };
-    if (dry) { say(`[dry] marks:${date} = ${JSON.stringify(payload)}`); continue; }
+    // v2 结构化载荷（2026-10-22 波次2）：points 与 byMp 内容等价、格式结构化。
+    // 过渡期 v1/v2 双写；Worker 按 at 取较新者（相同则优先 v2）。v1 停写计划在 30 天兼容期后。
+    const payloadV2 = { version: 2, total, points: pointsV2, at: payload.at, sync: payload.sync };
+    if (dry) { say(`[dry] marks:${date} = ${JSON.stringify(payload)}`); say(`[dry] marks:v2:${date} = ${JSON.stringify(payloadV2)}`); continue; }
+    // 先写 v2 再写 v1：若 v2 写成功而 v1 失败，Worker 的 at 比较会自然选用较新的 v1（旧）而不用旧 v2，
+    // 反之亦然——两个键互为备份，单键失败不产生「新 v1 + 旧 v2」的错配。
+    try {
+      await putKV(acc, ns, token, `marks:v2:${date}`, JSON.stringify(payloadV2));
+      say(`SYNC_OK date=${date} (v2) 监测点=${Object.keys(pointsV2).length} -> KV marks:v2:${date}`);
+    } catch (e) { say(`SYNC_WARN date=${date} 写 v2 失败：${e.message}（v1 仍会写入，Worker 自动回退）`); }
     try {
       await putKV(acc, ns, token, `marks:${date}`, JSON.stringify(payload));
       written.push(date);

@@ -56,19 +56,30 @@ for (const m of (D.transMpInfoList || [])) {
   if (segs.length) { const u = []; const seen = new Set(); for (const s of segs) { const k = `${s.reason}|${s.start}|${s.end}|${s.n}`; if (!seen.has(k)) { seen.add(k); u.push(s); } } byPub.set(nm, { manual: null, auto: segsToText(u) }); }
 }
 
-// 3) KV 标记
-let kvObj = null;
+// 3) KV 标记（优先 v2 结构化键 marks:v2:<date>；缺失回退 v1 文本键，与 Worker 取数口径一致）
+let kvObj = null, kvIsV2 = false;
+async function kvFetch(key) {
+  const r = await fetch(`https://api.cloudflare.com/client/v4/accounts/${process.env.CF_ACC}/storage/kv/namespaces/${process.env.CF_NS}/values/${encodeURIComponent(key)}`, { headers: { Authorization: `Bearer ${process.env.CF_TOK}` } });
+  return r.status === 200 ? JSON.parse(await r.text()) : null;
+}
 if (process.env.KV_FILE) kvObj = JSON.parse(readFileSync(process.env.KV_FILE, 'utf8'));
 else if (process.env.CF_ACC && process.env.CF_NS && process.env.CF_TOK) {
-  const r = await fetch(`https://api.cloudflare.com/client/v4/accounts/${process.env.CF_ACC}/storage/kv/namespaces/${process.env.CF_NS}/values/${encodeURIComponent('marks:' + DAY)}`, { headers: { Authorization: `Bearer ${process.env.CF_TOK}` } });
-  if (r.status === 200) kvObj = JSON.parse(await r.text());
+  kvObj = await kvFetch('marks:v2:' + DAY);
+  if (kvObj && Array.isArray(Object.keys(kvObj.points || {}))) kvIsV2 = true;
+  if (!kvIsV2) kvObj = await kvFetch('marks:' + DAY);
 }
 const kv = new Map();
-for (const [k, v] of Object.entries((kvObj && kvObj.byMp) || {})) kv.set(k, { manual: (v && v.manual) || null, auto: (v && v.auto) || null });
+if (kvIsV2) {
+  for (const [k, p] of Object.entries(kvObj.points || {})) {
+    kv.set(k, { v2: { manual: p.manual || null, auto: (p.auto && Array.isArray(p.auto.segs)) ? p.auto : { segs: [] } } });
+  }
+} else {
+  for (const [k, v] of Object.entries((kvObj && kvObj.byMp) || {})) kv.set(k, { manual: (v && v.manual) || null, auto: (v && v.auto) || null });
+}
 const merged = new Map();
 for (const [k, v] of byPub) merged.set(k, v);
 for (const [k, v] of kv) merged.set(k, v);
-const source = kv.size ? (byPub.size ? 'kv+public' : 'kv') : 'public';
+const source = kv.size ? (kvIsV2 ? 'kv(v2)' : 'kv') + (byPub.size ? '+public' : '') : 'public';
 
 // 4) 正文
 const unitRate = effRate(data);

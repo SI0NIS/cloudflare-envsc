@@ -390,23 +390,68 @@ async function fetchMarksPublic(psId, day) {
 // 为什么：企业端 116.178.28.170:3080 只对国内 IP 开放，Cloudflare 边缘（境外）连不上
 // （境外直连超时，裸 IP 还会被 Cloudflare 以 error code 1003 拒绝）。
 // 故抓取放在本机，结果落到 KV，边缘只负责读。这样零服务器、零厂商额度、长期免费。
+//
+// marks v2（2026-10-22 波次2）：同步端双写 `marks:v2:<date>`（结构化）与 `marks:<date>`（v1 文本）。
+// 取数规则：两键都读，**按 at 取较新者**（at 相同优先 v2）——单键写失败时自动回退到另一键，
+// 不会产生「新 v1 + 旧 v2」错配。
 async function fetchMarksFromKV(env, day) {
   if (!env.ENVSC_KV) return null;
-  let raw = null;
-  try { raw = await env.ENVSC_KV.get(`marks:${day}`); } catch (e) { return null; }
-  if (!raw) return null;
-  try {
+  let rawV1 = null, rawV2 = null;
+  try { [rawV1, rawV2] = await Promise.all([env.ENVSC_KV.get(`marks:${day}`), env.ENVSC_KV.get(`marks:v2:${day}`)]); }
+  catch (e) { return null; }
+  if (!rawV1 && !rawV2) return null;
+
+  // v1 解析（旧文本格式）
+  const parseV1 = (raw) => {
     const obj = JSON.parse(raw);
-    // 兼容旧格式（byMp 值为字符串=仅人工）与新格式（值为 {manual, auto}）
     const byMp = new Map();
     for (const [name, v] of Object.entries(obj.byMp || {})) {
       if (typeof v === 'string') byMp.set(name, { manual: v, auto: null });
       else byMp.set(name, { manual: (v && v.manual) || null, auto: (v && v.auto) || null });
     }
-    return { attempted: true, total: obj.total != null ? obj.total : 0, byMp, error: null, source: 'kv' };
-  } catch (e) {
-    return { attempted: true, total: 0, byMp: new Map(), error: `KV 解析失败 ${e.message}` };
+    return { attempted: true, total: obj.total != null ? obj.total : 0, byMp, error: null, source: 'kv', at: obj.at || null };
+  };
+  // v2 解析（结构化契约）
+  const parseV2 = (raw) => {
+    const obj = JSON.parse(raw);
+    const byMp = new Map();
+    for (const [name, p] of Object.entries(obj.points || {})) {
+      byMp.set(name, { v2: { manual: p.manual || null, auto: (p.auto && Array.isArray(p.auto.segs)) ? p.auto : { segs: [] } } });
+    }
+    return { attempted: true, total: obj.total != null ? obj.total : 0, byMp, error: null, source: 'kv', v2: true, at: obj.at || null };
+  };
+
+  let v1 = null, v2 = null, perr = null;
+  if (rawV2) { try { v2 = parseV2(rawV2); } catch (e) { perr = e; } }
+  if (rawV1) { try { v1 = parseV1(rawV1); } catch (e) { perr = perr || e; } }
+  if (v1 && v2) return (Date.parse(v2.at || 0) >= Date.parse(v1.at || 0)) ? v2 : v1;
+  if (v2) return v2;
+  if (v1) return v1;
+  return { attempted: true, total: 0, byMp: new Map(), error: `KV 解析失败 ${perr && perr.message}` };
+}
+
+// ---------- marks v2：结构化段 → 展示文本（与 v1 segsText/qyText 输出逐字节一致） ----------
+// 段：{ factors:[], head, start:"HH:mm", end:"HH:mm", minutes:N }
+// 时长格式与同步端 fmtDur 一致：整小时显示 "Nh"，否则 "Nmin"。
+const fmtDurV2 = (n) => (n % 60 === 0 && n >= 60) ? `${n / 60}h` : `${n}min`;
+const segBodyV2 = (s) => `${s.head} ${s.start}~${s.end}(${fmtDurV2(s.minutes)})`;
+function v2SegsText(segs, noGroup) {
+  if (!segs || !segs.length) return '';
+  if (noGroup) {
+    // rg 兜底路径：v1 为 windowText 平铺（每段自带因子名、；连接）
+    return segs.map((s) => `${s.factors && s.factors.length ? s.factors.join('/') + ' ' : ''}${segBodyV2(s)}`).join('；');
   }
+  // 连续同因子段并组（镜像 segsText/qyText）：组头 = 因子组合，组内段以 ；连接，组间以 ；\n 连接
+  const groups = [];
+  let cur = null;
+  for (const s of segs) {
+    const f = (s.factors && s.factors.length) ? s.factors.join('/') : '';
+    const body = segBodyV2(s);
+    if (f && cur && f === cur.factor) { cur.parts.push(body); continue; }
+    if (f) { cur = { factor: f, parts: [body] }; groups.push(cur); }
+    else { groups.push({ factor: '', parts: [body] }); cur = null; }
+  }
+  return groups.map((g) => (g.factor ? `${g.factor} ${g.parts.join('；')}` : g.parts.join('；'))).join('；\n');
 }
 
 // ---------- 设备标记：人工/自动时段覆盖判定 ----------
@@ -456,9 +501,14 @@ function buildText(data, j, marks) {
     const under = (r != null && r < 100) && !isWastewaterOk(mp); // 废水 ≤1h 标样核查不计异常
     const key0 = String(mp.mpName || '').trim();
     const m0 = marks && marks.byMp && marks.byMp.get(key0);
-    const hasManual = !!(m0 && String(m0.manual || '').trim());
-    // auto 可能多组多段（\n 分组、；分段）
-    const autoSegs = String((m0 && m0.auto) || '').split(/[\n；]/).map((s) => s.trim()).filter(Boolean);
+    // v2 结构化（2026-10-22 波次2）与 v1 文本并存：判定口径完全一致（有人工段/有自动段即 marked）
+    const hasManual = m0 && m0.v2
+      ? !!((m0.v2.manual && m0.v2.manual.segs && m0.v2.manual.segs.length))
+      : !!(m0 && String(m0.manual || '').trim());
+    // auto 可能多组多段（\n 分组、；分段）；v2 则为结构化 segs
+    const autoSegs = m0 && m0.v2
+      ? ((m0.v2.auto && m0.v2.auto.segs) || [])
+      : String((m0 && m0.auto) || '').split(/[\n；]/).map((s) => s.trim()).filter(Boolean);
     // 废水豁免点（有效率 ≥95.83，≤1h 标样核查区间）：**自动标记不构成推送理由**——
     //   标样核查/设备维护都发生在豁免期内，属官方豁免范畴（2026-10-08 用户要求）；
     //   仅人工标记（运维主动填报）触发推送。自动标记照样随推送展示。
@@ -504,7 +554,30 @@ function buildText(data, j, marks) {
     // 但人工优先级 > 自动：当某段「自动标记时段」被「人工标记时段」完全覆盖时，
     // 该段自动标记被抑制，仅推送人工标记（2026-09-30 改；9-29 生产工艺/环保尾气即为该情形）。
     // 仅当剩余自动标记去掉日期前缀后与人工完全相同才并成一行，避免刷屏。
-    if (m) {
+    if (m && m.v2) {
+      // ===== v2 结构化路径（2026-10-22 波次2） =====
+      // 覆盖抑制直接对结构化区间做运算，不再解析文本；展示文本由结构体生成（与 v1 逐字节一致）。
+      const norm = (s) => String(s || '').replace(/\d{2}-\d{2}\s+/g, '').replace(/\s*\n\s*/g, '\n').trim();
+      const manSegs = (m.v2.manual && m.v2.manual.segs) || [];
+      const manRanges = manSegs.map((s) => [toMin(s.start), toMin(s.end)]).filter((r) => r[0] != null && r[1] != null);
+      const man = manSegs.length ? norm(v2SegsText(manSegs, !!(m.v2.manual && m.v2.manual.noGroup))) : '';
+      const autoAll = (m.v2.auto && m.v2.auto.segs) || [];
+      const keptSegs = autoAll.filter((s) => {
+        if (isCheckSeg(s.head)) return true;          // 标样核查豁免覆盖抑制
+        const a = toMin(s.start), b = toMin(s.end);
+        if (a == null || b == null) return true;      // 异常区间不误删
+        return !rangeCoveredByAny([a, b], manRanges); // 被人工完全覆盖才抑制
+      });
+      const keptText = keptSegs.length ? norm(v2SegsText(keptSegs, false)) : '';
+      if (man) {
+        if (man.includes('\n')) lines.push(`人工标记：\n${man}`);
+        else lines.push(`人工标记：${man}`);
+      }
+      if (keptText && norm(keptText.replace(/\n/g, '；')) !== man) {
+        if (keptText.includes('\n')) lines.push(`自动标记：\n${keptText}`);
+        else lines.push(`自动标记：${keptText}`);
+      }
+    } else if (m) {
       const norm = (s) => String(s || '').replace(/\d{2}-\d{2}\s+/g, '').replace(/\s*\n\s*/g, '\n').trim();
       const man = norm(m.manual);
       const manRanges = parseRanges(m.manual);
@@ -765,7 +838,7 @@ async function watchdog(env) {
   return { watchdog: 'muted', day, today, why, note: '同步中断告警已关闭（云函数停用，改本机同步）' };
 }
 
-export { buildText, markText, fetchMarks, watchdog };
+export { buildText, markText, fetchMarks, watchdog, v2SegsText };
 
 // 北京时间推送窗口：默认 15:00–20:59（2026-10-08 用户要求；scheduled 与测试共用）
 // 窗口来自 config/project.json 的 pushWindow。
