@@ -101,35 +101,80 @@ async function solveSlider(page) {
       }
     }
     let last = 0;
-    for (let round = 1; round <= 6; round++) {
+    for (let round = 1; round <= 10; round++) {
       if (!veil()) return 'OK_R' + round + '_URL_' + location.href;
+      // 等图像就绪：run 宽度 ≥ 25 才算有效
       let r = null;
-      for (let t = 0; t < 30; t++) { r = detect(); if (r) break; await sleep(400); }
+      for (let t = 0; t < 50; t++) {
+        r = detect();
+        if (r && r.w >= 25) break;
+        r = null;
+        await sleep(400);
+      }
       if (!r) { await sleep(1500); continue; }
       const btn = document.getElementsByClassName('range-btn')[0];
       if (!btn) { await sleep(1500); continue; }
       const b = btn.getBoundingClientRect();
       const sx = Math.round(b.x + b.width / 2);
       const sy = Math.round(b.y + b.height / 2);
-      const dist = Math.round(r.gap - 29.5);
+      // 距离：缺口中心 - 滑块半宽（29.5），叠加 ±1px 随机
+      const base = r.gap - 29.5;
+      const dist = Math.round(base + (Math.random() * 2 - 1));
       last = dist;
       fire(btn, 'pointerdown', sx, sy); fire(btn, 'mousedown', sx, sy);
-      await sleep(160);
-      for (let s = 1; s <= 30; s++) {
-        const tt = s / 30;
+      await sleep(180 + Math.random() * 120);
+      // 分段拖动：46~56 步、每步 18~38ms、带轻微纵向抖动（更像人）
+      const steps = 46 + Math.floor(Math.random() * 10);
+      for (let s = 1; s <= steps; s++) {
+        const tt = s / steps;
         const ease = 1 - Math.pow(1 - tt, 3);
         const nx = Math.round(sx + dist * ease);
-        const ny = Math.round(sy + Math.sin(tt * Math.PI) * 1.5);
+        const ny = Math.round(sy + Math.sin(tt * Math.PI) * 1.5 + (Math.random() * 1.2 - 0.6));
         fire(btn, 'pointermove', nx, ny); fire(btn, 'mousemove', nx, ny);
-        await sleep(32);
+        await sleep(18 + Math.random() * 20);
       }
       fire(btn, 'pointerup', sx + dist, sy); fire(btn, 'mouseup', sx + dist, sy);
-      await sleep(3000);
+      await sleep(2500);
       if (!veil()) return 'OK_R' + round + '_DRAG_' + dist + '_URL_' + location.href;
-      await sleep(1500);
+      await sleep(2000);
     }
     return 'FAIL_LAST_' + last;
   });
+}
+
+// 单次登录尝试：goto → 填账号密码 → 点登录 → 过滑块 → 取 cookie 并校验
+async function attemptOnce(page) {
+  log('打开登录页…');
+  await page.goto(LOGIN_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
+  await sleep(3500);
+  try {
+    const closeBtn = await page.$('.el-dialog__headerbtn');
+    if (closeBtn) { await closeBtn.click(); await sleep(500); }
+  } catch (e) { /* ignore */ }
+  log('填写账号密码…');
+  await page.type('input[placeholder="请输入账号"]', ACCOUNT, { delay: 60 });
+  await page.type('input[placeholder="请输入密码"]', PASSWORD, { delay: 60 });
+  await sleep(600);
+  // 按钮文字是「登 录」（含空格），需去掉空白再匹配
+  const clicked = await page.evaluate(() => {
+    const btn = [...document.querySelectorAll('button')].find((b) => (b.textContent || '').replace(/\s/g, '').includes('登录') && !b.disabled);
+    if (btn) { btn.click(); return true; }
+    return false;
+  });
+  log(`登录按钮点击：${clicked}`);
+  if (!clicked) {
+    try { await page.focus('input[type="password"]'); await page.keyboard.press('Enter'); log('回车兜底已触发'); } catch (e) { /* ignore */ }
+  }
+  await page.waitForSelector('.vue-puzzle-vcode', { timeout: 15000 }).catch(() => log('未等到 .vue-puzzle-vcode（继续尝试）'));
+  await sleep(1500);
+  const res = await solveSlider(page);
+  log(`滑块结果：${res}`);
+  await sleep(2500);
+  const cookies = await page.cookies();
+  const c = cookies.find((x) => x.name === 'jointframe.cluster.sessionid');
+  if (!c) throw new Error(`未取到 sessionid（现有 cookie: ${cookies.map((x) => x.name).join(',') || '空'}）`);
+  const cookieStr = `jointframe.cluster.sessionid=${c.value}`;
+  return cookieStr;
 }
 
 (async () => {
@@ -152,43 +197,26 @@ async function solveSlider(page) {
     await page.evaluateOnNewDocument(() => {
       Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
     });
-    log('打开登录页…');
-    await page.goto(LOGIN_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
-    await sleep(3500);
-    try {
-      const closeBtn = await page.$('.el-dialog__headerbtn');
-      if (closeBtn) { await closeBtn.click(); await sleep(500); }
-    } catch (e) { /* ignore */ }
-    log('填写账号密码…');
-    await page.type('input[placeholder="请输入账号"]', ACCOUNT, { delay: 60 });
-    await page.type('input[placeholder="请输入密码"]', PASSWORD, { delay: 60 });
-    await sleep(600);
-    // 按钮文字是「登 录」（含空格），需去掉空白再匹配
-    const clicked = await page.evaluate(() => {
-      const btn = [...document.querySelectorAll('button')].find((b) => (b.textContent || '').replace(/\s/g, '').includes('登录') && !b.disabled);
-      if (btn) { btn.click(); return true; }
-      return false;
-    });
-    log(`登录按钮点击：${clicked}`);
-    if (!clicked) {
-      try { await page.focus('input[type="password"]'); await page.keyboard.press('Enter'); log('回车兜底已触发'); } catch (e) { /* ignore */ }
+    let lastErr = null;
+    for (let cycle = 1; cycle <= 3; cycle++) {
+      log(`--- 登录尝试 ${cycle}/3 ---`);
+      try {
+        const cookieStr = await attemptOnce(page);
+        const ok = await validateCookie(cookieStr);
+        log(`新 cookie 校验：${ok ? '有效 ✅' : '无效 ❌'}（${cookieStr.slice(0, 40)}…）`);
+        if (!ok) throw new Error('新 cookie 校验失败');
+        fs.writeFileSync(COOKIE_FILE, cookieStr, 'utf8');
+        log(`已写入 ${COOKIE_FILE}`);
+        log('=== 成功 ===');
+        process.exitCode = 0;
+        return;
+      } catch (e) {
+        lastErr = e;
+        log(`尝试 ${cycle} 失败：${(e && (e.message || e) || '').toString().slice(0, 200)}`);
+        await sleep(5000);
+      }
     }
-    await page.waitForSelector('.vue-puzzle-vcode', { timeout: 15000 }).catch(() => log('未等到 .vue-puzzle-vcode（继续尝试）'));
-    await sleep(1500);
-    const res = await solveSlider(page);
-    log(`滑块结果：${res}`);
-    await sleep(2500);
-    const cookies = await page.cookies();
-    const c = cookies.find((x) => x.name === 'jointframe.cluster.sessionid');
-    if (!c) throw new Error(`未取到 sessionid（现有 cookie: ${cookies.map((x) => x.name).join(',') || '空'}）`);
-    const cookieStr = `jointframe.cluster.sessionid=${c.value}`;
-    const ok = await validateCookie(cookieStr);
-    log(`新 cookie 校验：${ok ? '有效 ✅' : '无效 ❌'}（${cookieStr.slice(0, 40)}…）`);
-    if (!ok) throw new Error('新 cookie 校验失败，未写入文件');
-    fs.writeFileSync(COOKIE_FILE, cookieStr, 'utf8');
-    log(`已写入 ${COOKIE_FILE}`);
-    log('=== 成功 ===');
-    process.exitCode = 0;
+    throw lastErr || new Error('全部尝试失败');
   } catch (e) {
     log(`失败：${e && (e.stack || e.message || e)}`);
     process.exitCode = 1;
