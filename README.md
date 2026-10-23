@@ -236,11 +236,12 @@ npx wrangler tail                            # 观察定时执行的实时日志
 | 覆盖时段 | 最近 **2 个已完成小时**（数据晚到可在下一小时补上）；也支持 `--date/--hour` 指定 |
 | 数据源 | 企业端 `online-monitor/data/list`（小时行的实测值/标准值/有效性）+ `online-monitor/view/list`（折算值序列） |
 | 判定口径 | **废气用折算值**、**废水用实测值**（废水无折算）；仅「数据有效」参与；严格大于标准（`minRatio` 可调） |
-| 标准值 | 优先用平台返回的 `outlet_standard`；平台未配置时用 `config/standards.json` 兜底 |
+| 标准值 | `config/standards.json` **优先**（`_mode=override`，用于重污染天气绩效分级 A 级等更严口径）；表中没有的因子才用平台 `outlet_standard` |
+| 当前限值口径 | **A 级**：废气颗粒物 **10 mg/m³**、非甲烷总烃 **30 mg/m³**（`_gas` 段）；二氧化硫/氮氧化物等仍用平台值 |
 | 去重 | KV `alarm:<日期>:<小时>:<监测点>:<因子>`（TTL 3 天） |
-| 推送 | Bark（`group=小时超标`，`level=timeSensitive`），一次运行合并一条 |
-| 状态 | KV `last-hourly-alarm`（checked / exceeded / pushed / missingStd） |
-| 配置 | `config/project.json` → `hourlyAlarm`；限值兜底 → `config/standards.json` |
+| 推送 | Bark（`group=小时超标`，`level=timeSensitive`），一次运行合并一条；A 级表判定的会标注「A级标准」 |
+| 状态 | KV `last-hourly-alarm`（checked / exceeded / pushed / stdOverrides / missingStd） |
+| 配置 | `config/project.json` → `hourlyAlarm`；限值 → `config/standards.json`（`_mode` 可切 override/fallback） |
 
 手动演练：
 

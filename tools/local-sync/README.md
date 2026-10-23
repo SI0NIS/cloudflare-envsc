@@ -43,11 +43,15 @@ node tools/local-sync/hourly-alarm.cjs --date 2026-10-22 --hour 11 --dry-run --v
 |---|---|
 | 数据源 | 企业端 `online-monitor/data/list`（小时行：`avg_value_<code>` 实测、`outlet_standard_<code>` 标准、`flag_<code>` 有效性）+ `online-monitor/view/list`（`avg_zs[]` 折算序列） |
 | 判定口径 | **废气用折算值**（`avg_zs`，缺失时退回实测）；**废水（mpType=4）用实测值**（平台无折算）；仅 `flag=数据有效` 参与；严格大于标准 |
+| 标准值 | `config/standards.json` **优先**（`_mode=override`）；表中没有的因子才用平台 `outlet_standard` |
+| 当前限值 | 重污染天气绩效分级 **A 级**：废气颗粒物 **10**、非甲烷总烃 **30**（`_gas` 段）；SO₂/NOₓ 等沿用平台值 |
 | 覆盖时段 | 默认最近 2 个已完成小时（数据晚到可在下一小时补上），也可 `--date/--hour` 指定 |
 | 去重 | KV `alarm:<日期>:<小时>:<监测点>:<因子>`（TTL 3 天），同一小时同一因子只推一次 |
-| 推送 | Bark，`group=小时超标`、`level=timeSensitive`；一次运行合并为一条 |
-| 状态 | KV `last-hourly-alarm`（checked/exceeded/pushed） |
+| 推送 | Bark，`group=小时超标`、`level=timeSensitive`；一次运行合并为一条；A 级表判定标注「A级标准」 |
+| 状态 | KV `last-hourly-alarm`（checked/exceeded/pushed/stdOverrides/missingStd） |
 | 配置 | `config/project.json` → `hourlyAlarm`：`enabled` / `compare=auto` / `minRatio` / `requireValid` / `maxItemsPerPush` |
+
+> 标准表查找顺序：监测点名 → `_gas`（废气通用）→ `*`；`_mode=fallback` 时改为「仅平台缺值时兜底」。
 
 > 说明：`view/list` 的 `label`/`prop` 字段用的是平台默认模板（不可靠），脚本按「实测值相等」把折算序列对齐到因子编码；
 > 平台未配置标准值的因子（`outlet_standard` 为空）无法判定，会被跳过（对应平台「未设上下限」情形）。

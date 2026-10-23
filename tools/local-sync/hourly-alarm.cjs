@@ -3,7 +3,9 @@
 // 背景：平台只提供查询接口（无推送）。本脚本补上「轮询 → 阈值判定 → 推送」的最后一公里：
 //   1) 取企业端「小时行」（online-monitor/data/list，dateType=1），每行含各因子
 //      avg_value_<code>（实测）、outlet_standard_<code>（标准值）、flag_<code>（数据有效性）；
-//   2) 判定：见 lib/exceed.js（compare=avg_value|o2_corrected|max，minRatio，requireValid）；
+//   2) 判定：见 lib/exceed.js（废气用折算值、废水用实测值；minRatio，requireValid）；
+//      标准值优先取 config/standards.json（_mode=override，用于绩效分级 A 级等更严口径），
+//      表中没有的因子才用平台 outlet_standard；
 //   3) 去重：KV `alarm:<date>:<hour>:<mp>:<code>`（TTL 3 天），同一小时同一因子只告警一次；
 //   4) 推送：Bark（一次运行合并一条）；无超标则不打扰；
 //   5) 状态：KV `last-hourly-alarm`（供排查）。
@@ -37,13 +39,19 @@ function loadJson(file, fallback) {
 }
 const CFG = loadJson(CONFIG_FILE, {});
 const PROJECT = loadJson(path.join(REPO_ROOT, 'config', 'project.json'), {});
-// 标准限值兜底表（平台未返回 outlet_standard 时使用）
-const STD_OVERRIDE = loadJson(path.join(REPO_ROOT, 'config', 'standards.json'), {});
-function stdOverride(mpName, code) {
-  const byMp = STD_OVERRIDE[mpName] || {};
-  const v = byMp[code] != null ? byMp[code] : (STD_OVERRIDE['*'] || {})[code];
-  const n = Number(v);
-  return Number.isFinite(n) && n > 0 ? n : null;
+// 标准限值表（config/standards.json）
+//   _mode=override：本表优先于平台 outlet_standard（绩效分级 A 级等更严口径必须覆盖，
+//                   例如平台给颗粒物 30，A 级要求 10）；
+//   _mode=fallback：仅当平台未返回标准值时才兜底。
+//   查找顺序：监测点名 → _gas（废气通用，mpType≠4）→ '*'。
+const STD_TABLE = loadJson(process.env.ENVSC_STANDARDS_FILE || path.join(REPO_ROOT, 'config', 'standards.json'), {});
+const STD_MODE = STD_TABLE._mode === 'fallback' ? 'fallback' : 'override';
+function stdFromTable(mpName, code, isGas) {
+  const pick = (obj) => (obj && obj[code] != null ? Number(obj[code]) : null);
+  for (const n of [pick(STD_TABLE[mpName]), isGas ? pick(STD_TABLE._gas) : null, pick(STD_TABLE['*'])]) {
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  return null;
 }
 const ALARM = Object.assign({
   enabled: true,
@@ -61,7 +69,8 @@ const PSID = CNEMC.psid || PROJECT.psId || '654000000031';
 
 // 因子编码 → 名称（优先 runtime 缓存，按 mpId 索引；缓存由每日同步写入）
 const FALLBACK_NAMES = {
-  '001': '颗粒物', '002': '二氧化硫', '003': '氮氧化物',
+  '001': '颗粒物', '002': '二氧化硫', '003': '氮氧化物', '005': '非甲烷总烃',
+  '011': '化学需氧量', '012': '氨氮',
   S01: '氧含量', S02: '流速', S03: '温度', S05: '湿度', S08: '压力', B01: '流量', B02: '流量',
 };
 const NAMES = loadJson(NAMES_FILE, {});
@@ -244,6 +253,7 @@ async function pushBark(title, body) {
   const dates = [...new Set(hourKeys.map((h) => h.date))];
   const hitByHour = new Map(); // "date hour" -> [{mp, code, ...}]
   const missingStd = new Set(); // 有数值但无标准值（无法判定）的因子
+  const stdDiff = new Set(); // 平台标准值与本地标准表不一致（按本地表判定）
   let checkedFactors = 0;
   for (const day of dates) {
     for (const mp of mps) {
@@ -260,21 +270,28 @@ async function pushBark(title, body) {
         const prefix = `${day} ${String(hk.hour).padStart(2, '0')}`;
         const row = rows.find((r) => String((r.data_time && r.data_time.item && r.data_time.item.label) || '').startsWith(prefix));
         if (!row) continue;
-        // ① 实测/标准/有效性（按因子编码，来自 data/list，逐字段可靠；标准缺失时用 standards.json 兜底）
+        // ① 实测/标准/有效性（按因子编码，来自 data/list，逐字段可靠）
         const perCode = {};
         for (const code of CODES) {
           const v = num((cell(row, `avg_value_${code}`) || {}).label);
           if (v == null) continue;
           const sPlatform = num((cell(row, `outlet_standard_${code}`) || {}).label);
           const f = (cell(row, `flag_${code}`) || {}).label || '';
-          const sOverride = sPlatform == null ? stdOverride(mp.name, code) : null;
-          const s = sPlatform != null ? sPlatform : sOverride;
+          const sLocal = stdFromTable(mp.name, code, isGas);
+          // override：本地表优先（A 级等更严口径）；fallback：仅平台缺失时兜底
+          let s = null;
+          let stdSource = '';
+          if (sLocal != null && (STD_MODE === 'override' || sPlatform == null)) { s = sLocal; stdSource = 'A级表'; }
+          else if (sPlatform != null) { s = sPlatform; stdSource = '平台'; }
           if (s == null) {
             // 工况参数（S0x/B0x）本身没有限值，不计入"缺标准"
             if (!/^[SB]\d{2}$/i.test(code)) missingStd.add(`${mp.name}/${code}`);
             continue;
           }
-          perCode[code] = { value: v, standard: s, flag: f, stdSource: sPlatform != null ? 'platform' : 'override' };
+          if (sLocal != null && sPlatform != null && Math.abs(sLocal - sPlatform) > 1e-9) {
+            stdDiff.add(`${mp.name}/${code}：平台 ${sPlatform} → A级 ${sLocal}`);
+          }
+          perCode[code] = { value: v, standard: s, flag: f, stdSource };
         }
         // ② 废气折算：view/list 的 avg_zs[hour]（数组下标 = 小时）；用实测值匹配到因子编码
         const zsByCode = {};
@@ -304,7 +321,7 @@ async function pushBark(title, body) {
           if (!ev.exceeded) continue;
           const key = `${hk.date} ${hk.hour}`;
           if (!hitByHour.has(key)) hitByHour.set(key, []);
-          hitByHour.get(key).push({ mp: mp.name, code, name: factorName(mp.id, code), ...ev, hourKey: key, isGas });
+          hitByHour.get(key).push({ mp: mp.name, code, name: factorName(mp.id, code), ...ev, hourKey: key, isGas, stdSource: pc.stdSource });
         }
       }
     }
@@ -312,6 +329,7 @@ async function pushBark(title, body) {
 
   const all = [...hitByHour.entries()].flatMap(([hourKey, items]) => items.map((it) => ({ ...it, hourKey })));
   log(`检索完成：数值因子 ${checkedFactors} 个，超标命中 ${all.length} 条`);
+  if (stdDiff.size) log(`标准表（${STD_MODE}）覆盖平台限值 ${stdDiff.size} 项：${[...stdDiff].join('；')}`);
   if (missingStd.size) log(`缺少标准值（无法判定）${missingStd.size} 项：${[...missingStd].slice(0, 20).join('、')}${missingStd.size > 20 ? ' …' : ''}（可在 config/standards.json 补充）`);
 
   // 去重
@@ -328,7 +346,7 @@ async function pushBark(title, body) {
   if (!fresh.length) {
     log('=== 完成（无新增超标）===');
     if (!dryRun && CF.apiToken) {
-      try { await kvPut('last-hourly-alarm', JSON.stringify({ at: new Date().toISOString(), ok: true, checked: checkedFactors, exceeded: all.length, pushed: 0, missingStd: missingStd.size, missingSample: [...missingStd].slice(0, 20) })); } catch (e) { /* ignore */ }
+      try { await kvPut('last-hourly-alarm', JSON.stringify({ at: new Date().toISOString(), ok: true, checked: checkedFactors, exceeded: all.length, pushed: 0, stdMode: STD_MODE, stdOverrides: stdDiff.size, missingStd: missingStd.size, missingSample: [...missingStd].slice(0, 20) })); } catch (e) { /* ignore */ }
     }
     process.exit(0);
   }
@@ -341,7 +359,7 @@ async function pushBark(title, body) {
     const val = Number(it.judged.toFixed(3));
     const head = it.usedZs ? '折算 ' : '';
     const extra = it.usedZs ? `（实测 ${Number(it.value.toFixed(3))}）` : '';
-    return `· ${it.hourKey.slice(5)}时 ${it.mp} ${it.name} ${head}${val}${extra}（标准 ${it.standard}，超 ${ratioPct}%）`;
+    return `· ${it.hourKey.slice(5)}时 ${it.mp} ${it.name} ${head}${val}${extra}（${it.stdSource === 'A级表' ? 'A级标准' : '标准'} ${it.standard}，超 ${ratioPct}%）`;
   });
   if (fresh.length > shown.length) lines.push(`…另有 ${fresh.length - shown.length} 条未展示`);
   const body = lines.join('\n');
@@ -367,6 +385,7 @@ async function pushBark(title, body) {
       await kvPut('last-hourly-alarm', JSON.stringify({
         at: new Date().toISOString(), ok: r.ok, checked: checkedFactors,
         exceeded: all.length, pushed: r.ok ? shown.length : 0, title,
+        stdMode: STD_MODE, stdOverrides: stdDiff.size,
         missingStd: missingStd.size, missingSample: [...missingStd].slice(0, 20),
       }));
     } catch (e) { /* ignore */ }

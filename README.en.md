@@ -241,10 +241,11 @@ The platform only offers query APIs — no push. A local runner closes the loop:
 | Window | The last **2 completed hours** (late data is caught on the next run); `--date/--hour` for manual checks |
 | Sources | Enterprise `online-monitor/data/list` (measured value / standard / validity) + `online-monitor/view/list` (converted series) |
 | Rule | **Gas uses the converted value**; **wastewater uses the measured value** (no conversion exists); only `数据有效` rows are judged; strictly greater than the standard (`minRatio` configurable) |
-| Standards | Platform `outlet_standard` first; fallback to `config/standards.json` |
+| Standards | `config/standards.json` takes **precedence** (`_mode=override`, for stricter rules such as the Class-A performance grading); platform `outlet_standard` is used only for factors absent from the table |
+| Current limits | **Class A**: particulate matter **10 mg/m³**, NMHC **30 mg/m³** (the `_gas` section); SO₂/NOₓ etc. still use platform values |
 | Dedup | KV `alarm:<date>:<hour>:<point>:<factor>` (3-day TTL) |
-| Push | Bark (`group=小时超标`, `timeSensitive`), one message per run |
-| Status | KV `last-hourly-alarm` (checked / exceeded / pushed / missingStd) |
+| Push | Bark (`group=小时超标`, `timeSensitive`), one message per run; entries judged by the Class-A table are labelled `A级标准` |
+| Status | KV `last-hourly-alarm` (checked / exceeded / pushed / stdOverrides / missingStd) |
 
 Manual dry run:
 

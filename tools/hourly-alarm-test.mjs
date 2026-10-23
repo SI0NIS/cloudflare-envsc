@@ -108,6 +108,19 @@ const opts = { compare: 'avg_value', minRatio: 1, requireValid: true, o2Code: 'S
   check('⑭ flag=-- 且 requireValid → 不判超标', r && !r.exceeded && r.valid === false, JSON.stringify(r));
 }
 
+// ⑮ 标准表（重污染天气绩效分级 A 级）：颗粒物 10、非甲烷总烃 30，且优先于平台限值
+{
+  const fs = await import('node:fs');
+  const std = JSON.parse(fs.readFileSync(new URL('../config/standards.json', import.meta.url), 'utf8'));
+  check('⑮ standards.json：_mode=override（优先于平台限值）', std._mode === 'override', std._mode);
+  check('⑯ A级限值：颗粒物 001=10、非甲烷总烃 005=30',
+    Number(std._gas && std._gas['001']) === 10 && Number(std._gas && std._gas['005']) === 30,
+    JSON.stringify(std._gas));
+  const r = judgePoint(12, 12, Number(std._gas['001']), '数据有效', { useZs: true, minRatio: 1, requireValid: true });
+  check('⑰ 颗粒物折算 12 / A级 10 → 超标（若按平台 30 则不会报）',
+    r && r.exceeded && Math.abs(r.ratio - 1.2) < 1e-9, JSON.stringify(r));
+}
+
 const failed = results.filter((r) => !r.pass);
 console.log(`\n${results.length - failed.length}/${results.length} PASS`);
 process.exit(failed.length ? 1 : 0);
