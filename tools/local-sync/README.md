@@ -54,6 +54,17 @@ node tools/local-sync/hourly-alarm.cjs --date 2026-10-22 --hour 11 --dry-run --v
 
 > 标准表查找顺序：监测点名 → `_gas`（废气通用）→ `*`；`ENVSC_STANDARDS_FILE` 可指定临时表用于演练。
 
+### 字段与页面核对（2026-10-23）
+
+- 页面：`http://116.178.28.170:3080/amOnline/zdjk-company-base/ctc__/__10__`（“数据监测”，
+  前端路由；直接用 curl GET 该路由会返回 404，但页面在浏览器内由 SPA 正常渲染）。
+- 页面列 ↔ 接口字段：**标干值** = `avg_value_<code>`、**标准值** = `outlet_standard_<code>`、
+  **设备标记** = `flag_<code>`；排放量为前端按流量×浓度计算，接口不直接提供。
+- 实测对照（2026-10-23 15~16 环保尾气排放口）：页面标干值 **3.291**、标准值 **100**，
+  接口 `avg_value_508=3.291`、`outlet_standard_508=100`，逐位一致 → **非甲烷总烃 `code=508`**。
+- 因子编码以 `/monitoritem/pollutant/list?mpId=&mpType=` 为准；`005/010` 不是非甲烷总烃
+  （005 恒 0.011、010≈0.35，且长期 `flag=故障`），不要再用它们判定 NMHC。
+
 > 说明：`view/list` 的 `label`/`prop` 字段用的是平台默认模板（不可靠），脚本按「实测值相等」把折算序列对齐到因子编码；
 > 平台未配置标准值的因子（`outlet_standard` 为空）无法判定，会被跳过（对应平台「未设上下限」情形）。
 

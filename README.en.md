@@ -254,6 +254,10 @@ Manual dry run:
 node tools/local-sync/hourly-alarm.cjs --date 2026-10-22 --hour 11 --dry-run --verbose
 ```
 
+> The page-to-API field mapping (dry value = `avg_value_<code>`, standard = `outlet_standard_<code>`,
+> and how NMHC was confirmed as code 508) is documented in
+> [tools/local-sync/README.md](tools/local-sync/README.md#字段与页面核对2026-10-23).
+
 ## Local Development & Testing
 
 ```bash

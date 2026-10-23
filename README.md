@@ -250,6 +250,9 @@ npx wrangler tail                            # 观察定时执行的实时日志
 node tools/local-sync/hourly-alarm.cjs --date 2026-10-22 --hour 11 --dry-run --verbose
 ```
 
+> 页面列与接口字段的对照（标干值=`avg_value_<code>`、标准值=`outlet_standard_<code>`，
+> 以及“非甲烷总烃=508”的核实过程）见 [tools/local-sync/README.md](tools/local-sync/README.md#字段与页面核对2026-10-23)。
+
 ## 本地开发与测试
 
 ```bash
