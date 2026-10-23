@@ -44,7 +44,7 @@ node tools/local-sync/hourly-alarm.cjs --date 2026-10-22 --hour 11 --dry-run --v
 | 数据源 | 企业端 `online-monitor/data/list`（小时行：`avg_value_<code>` 实测、`outlet_standard_<code>` 标准、`flag_<code>` 有效性）+ `online-monitor/view/list`（`avg_zs[]` 折算序列）；因子清单取自 `/monitoritem/pollutant/list` |
 | 因子编码 | 动态获取（**非甲烷总烃=508**、颗粒物=001、二氧化硫=002、氮氧化物=003、化学需氧量=011、氨氮=060），避免编码猜错导致漏判 |
 | 判定口径 | **废气用折算值**（`avg_zs`，缺失时退回实测）；**废水（mpType=4）用实测值**（平台无折算）；仅 `flag=数据有效` 参与；严格大于标准 |
-| 两层标准 | `a` = 重污染天气绩效分级 A 级（颗粒物 10、非甲烷总烃 30）；`legal` = 排放标准（平台 `outlet_standard`：颗粒物 30、非甲烷总烃 **100**），平台缺失时用 `legal` 表兜底 |
+| 两层标准 | `a` = 重污染天气绩效分级 A 级（颗粒物 10、非甲烷总烃 30）；`legal` = 排放标准（平台 `outlet_standard`，2026-10-23 截图核实：颗粒物 30、二氧化硫 100、氮氧化物 100、非甲烷总烃 100），平台缺值时用 `legal` 表兜底 |
 | 文案 | 仅超 A 级：`超A级标准 30，超 x%；未超排放标准 100`（标题「A级预警」）；两层均超：`超排放标准 100，超 x%；A级标准 30 亦超`（标题「小时超标」） |
 | 覆盖时段 | 默认最近 2 个已完成小时（数据晚到可在下一小时补上），也可 `--date/--hour` 指定 |
 | 去重 | KV `alarm:<日期>:<小时>:<监测点>:<因子>:<层级>`（TTL 3 天） |
@@ -64,6 +64,9 @@ node tools/local-sync/hourly-alarm.cjs --date 2026-10-22 --hour 11 --dry-run --v
   接口 `avg_value_508=3.291`、`outlet_standard_508=100`，逐位一致 → **非甲烷总烃 `code=508`**。
 - 因子编码以 `/monitoritem/pollutant/list?mpId=&mpType=` 为准；`005/010` 不是非甲烷总烃
   （005 恒 0.011、010≈0.35，且长期 `flag=故障`），不要再用它们判定 NMHC。
+- 平台排放标准核实（2026-10-23）：1号2号机组 10-23 17 时 颗粒物 **30**、二氧化硫 **100**、
+  氮氧化物 **100**；环保尾气 15 时 非甲烷总烃 **100**——与接口 `outlet_standard_<code>` 逐一对应，
+  已作为 `legal` 层兜底值写入 `config/standards.json`。
 
 > 说明：`view/list` 的 `label`/`prop` 字段用的是平台默认模板（不可靠），脚本按「实测值相等」把折算序列对齐到因子编码；
 > 平台未配置标准值的因子（`outlet_standard` 为空）无法判定，会被跳过（对应平台「未设上下限」情形）。

@@ -171,6 +171,20 @@ const opts = { compare: 'avg_value', minRatio: 1, requireValid: true, o2Code: 'S
   check('㉔ 无排放标准文案：平台未配置排放标准', /平台未配置排放标准/.test(describeTier(r)), describeTier(r));
 }
 
+// ㉕ 排放标准兜底值：平台截图核实（颗粒物 30、SO2 100、NOx 100、非甲烷总烃 100）
+{
+  const fs = await import('node:fs');
+  const std = JSON.parse(fs.readFileSync(new URL('../config/standards.json', import.meta.url), 'utf8'));
+  const L = (std.legal && std.legal._gas) || {};
+  check('㉕ 排放标准兜底：001=30、002=100、003=100、508=100',
+    Number(L['001']) === 30 && Number(L['002']) === 100
+    && Number(L['003']) === 100 && Number(L['508']) === 100, JSON.stringify(L));
+  const A = (std.a && std.a._gas) || {};
+  check('㉖ A级严于排放标准（001、508 必须更小）',
+    Number(A['001']) < Number(L['001']) && Number(A['508']) < Number(L['508']),
+    `A=${JSON.stringify(A)} L=${JSON.stringify(L)}`);
+}
+
 const failed = results.filter((r) => !r.pass);
 console.log(`\n${results.length - failed.length}/${results.length} PASS`);
 process.exit(failed.length ? 1 : 0);
