@@ -219,6 +219,16 @@ function payloadComplete(m) {
       await alertOnceToday('envsc 本机同步失败', `目标日 ${date} 同步失败：${detail}\n请检查 runtime/cnemc-cookie.txt 与网络`);
     }
     log('=== 完成 ===');
+    // 把因子 code→名称 缓存到 runtime（按 mpId 索引；小时告警用它显示中文名；失败不影响同步结果）
+    try {
+      const test = mod._test;
+      if (test && test.MP_FACTOR_NAMES) {
+        const out = {};
+        for (const [mpId, map] of test.MP_FACTOR_NAMES) out[mpId] = Object.fromEntries(map);
+        fs.writeFileSync(path.join(RUNTIME, 'factor-names.json'), JSON.stringify(out, null, 1), 'utf8');
+        log(`已缓存因子名 ${Object.keys(out).length} 个监测点 → runtime/factor-names.json`);
+      }
+    } catch (e) { log(`因子名缓存失败（不阻断）：${e.message}`); }
     await kvPutStatus({ at: new Date().toISOString(), date, result: r.ok ? 'ok' : 'fail', written: r.written, okCount: r.okCount, failCount: r.failCount });
     process.exit(r.ok ? 0 : 1);
   } catch (e) {

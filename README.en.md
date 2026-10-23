@@ -231,6 +231,27 @@ The cron in `wrangler.toml` is in **UTC**: `0 7-12 * * *` = **15:00–20:00 CST 
 - 6 trigger points = up to 6 retries (`not_ready` / failures defer automatically);
 - A successful push writes the KV dedup key, so you're disturbed at most once a day; title-only (all-compliant) days write it too.
 
+## Hourly Exceedance Alerts (added 2026-10-23)
+
+The platform only offers query APIs — no push. A local runner closes the loop:
+
+| Item | Description |
+|---|---|
+| Trigger | Windows task `ENVSC-Hourly-Alarm`, runs `tools/local-sync/hourly-alarm.cjs` at **:20 every hour** |
+| Window | The last **2 completed hours** (late data is caught on the next run); `--date/--hour` for manual checks |
+| Sources | Enterprise `online-monitor/data/list` (measured value / standard / validity) + `online-monitor/view/list` (converted series) |
+| Rule | **Gas uses the converted value**; **wastewater uses the measured value** (no conversion exists); only `数据有效` rows are judged; strictly greater than the standard (`minRatio` configurable) |
+| Standards | Platform `outlet_standard` first; fallback to `config/standards.json` |
+| Dedup | KV `alarm:<date>:<hour>:<point>:<factor>` (3-day TTL) |
+| Push | Bark (`group=小时超标`, `timeSensitive`), one message per run |
+| Status | KV `last-hourly-alarm` (checked / exceeded / pushed / missingStd) |
+
+Manual dry run:
+
+```bash
+node tools/local-sync/hourly-alarm.cjs --date 2026-10-22 --hour 11 --dry-run --verbose
+```
+
 ## Local Development & Testing
 
 ```bash

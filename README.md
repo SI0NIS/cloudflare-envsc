@@ -226,6 +226,28 @@ npx wrangler tail                            # 观察定时执行的实时日志
 - 6 个触发点 = 最多 6 次重试机会（`not_ready` / 失败自动顺延）；
 - 推送成功写 KV 去重键，当天不会重复打扰；全达标（仅标题）同样写去重。
 
+## 小时超标告警（2026-10-23 新增）
+
+平台只提供查询接口、没有推送能力。本机脚本补齐「轮询 → 阈值判定 → 推送」：
+
+| 项 | 说明 |
+|---|---|
+| 触发 | Windows 计划任务 `ENVSC-Hourly-Alarm`，每小时 **:20** 运行 `tools/local-sync/hourly-alarm.cjs` |
+| 覆盖时段 | 最近 **2 个已完成小时**（数据晚到可在下一小时补上）；也支持 `--date/--hour` 指定 |
+| 数据源 | 企业端 `online-monitor/data/list`（小时行的实测值/标准值/有效性）+ `online-monitor/view/list`（折算值序列） |
+| 判定口径 | **废气用折算值**、**废水用实测值**（废水无折算）；仅「数据有效」参与；严格大于标准（`minRatio` 可调） |
+| 标准值 | 优先用平台返回的 `outlet_standard`；平台未配置时用 `config/standards.json` 兜底 |
+| 去重 | KV `alarm:<日期>:<小时>:<监测点>:<因子>`（TTL 3 天） |
+| 推送 | Bark（`group=小时超标`，`level=timeSensitive`），一次运行合并一条 |
+| 状态 | KV `last-hourly-alarm`（checked / exceeded / pushed / missingStd） |
+| 配置 | `config/project.json` → `hourlyAlarm`；限值兜底 → `config/standards.json` |
+
+手动演练：
+
+```bash
+node tools/local-sync/hourly-alarm.cjs --date 2026-10-22 --hour 11 --dry-run --verbose
+```
+
 ## 本地开发与测试
 
 ```bash

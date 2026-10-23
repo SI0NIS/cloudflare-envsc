@@ -10,6 +10,9 @@
 | `run_scf_local.cjs` | 主脚本：查 KV 是否已同步 → 确保 cookie 有效（无效则调 `auto-login`）→ 调 `tools/scf-marks-sync/index.js` 的 `main_handler` 抓取并写 KV → 失败发 Bark 告警（每天一次） |
 | `auto-login/auto-login.cjs` | 自动登录企业端：puppeteer-core + 本机 Chrome，滑块由 canvas 差值 + 合成 pointer 事件破解；校验通过后写 `runtime/cnemc-cookie.txt` |
 | `auto-login/debug-login.cjs` | 页面改版时调试用：导出输入框/按钮/滑块结构并截图 |
+| `hourly-alarm.cjs` | **小时超标告警**：每整点检查最近 2 个已完成小时，按「废气折算值 / 废水实测值」与标准值比较，超标推 Bark（去重） |
+| `lib/exceed.js` | 超标判定纯函数（可单测；`tools/hourly-alarm-test.mjs` 覆盖） |
+| `lib/log.js` | 共享日志（1MB 轮转） |
 | `local-config.example.json` | 配置模板，复制为 `local-config.json` 并填入密钥（**已被 gitignore**） |
 
 运行时数据都在 `runtime/`（**已被 gitignore**）：`cnemc-cookie.txt`、`logs/`。
@@ -28,6 +31,38 @@ cp ../local-config.example.json ../local-config.json   # 填入账号/密码/CF 
 node tools/local-sync/run_scf_local.cjs --quick                 # 只同步 D-1（定时任务用，约 30-40 秒）
 node tools/local-sync/run_scf_local.cjs 2026-10-20 2 --force    # 指定日期与天数，忽略"今日已同步"检查
 node tools/local-sync/auto-login/auto-login.cjs                 # 仅刷新 cookie
+node tools/local-sync/hourly-alarm.cjs                          # 小时告警（最近 2 个已完成小时）
+node tools/local-sync/hourly-alarm.cjs --date 2026-10-22 --hour 11 --dry-run --verbose  # 指定小时演练
+```
+
+## 小时超标告警
+
+平台没有推送能力，只能查询。`hourly-alarm.cjs` 在本机补齐「轮询 → 判定 → 推送」：
+
+| 项 | 说明 |
+|---|---|
+| 数据源 | 企业端 `online-monitor/data/list`（小时行：`avg_value_<code>` 实测、`outlet_standard_<code>` 标准、`flag_<code>` 有效性）+ `online-monitor/view/list`（`avg_zs[]` 折算序列） |
+| 判定口径 | **废气用折算值**（`avg_zs`，缺失时退回实测）；**废水（mpType=4）用实测值**（平台无折算）；仅 `flag=数据有效` 参与；严格大于标准 |
+| 覆盖时段 | 默认最近 2 个已完成小时（数据晚到可在下一小时补上），也可 `--date/--hour` 指定 |
+| 去重 | KV `alarm:<日期>:<小时>:<监测点>:<因子>`（TTL 3 天），同一小时同一因子只推一次 |
+| 推送 | Bark，`group=小时超标`、`level=timeSensitive`；一次运行合并为一条 |
+| 状态 | KV `last-hourly-alarm`（checked/exceeded/pushed） |
+| 配置 | `config/project.json` → `hourlyAlarm`：`enabled` / `compare=auto` / `minRatio` / `requireValid` / `maxItemsPerPush` |
+
+> 说明：`view/list` 的 `label`/`prop` 字段用的是平台默认模板（不可靠），脚本按「实测值相等」把折算序列对齐到因子编码；
+> 平台未配置标准值的因子（`outlet_standard` 为空）无法判定，会被跳过（对应平台「未设上下限」情形）。
+
+### Windows 计划任务（每小时 :20）
+
+```powershell
+$action  = New-ScheduledTaskAction -Execute "<node.exe 绝对路径>" `
+           -Argument '"<仓库路径>\tools\local-sync\hourly-alarm.cjs"' `
+           -WorkingDirectory "<仓库路径>"
+$trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).Date.AddHours(0).AddMinutes(20) `
+           -RepetitionInterval (New-TimeSpan -Hours 1)
+$set     = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 10) `
+           -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+Register-ScheduledTask -TaskName "ENVSC-Hourly-Alarm" -Action $action -Trigger $trigger -Settings $set -Force
 ```
 
 ## Windows 计划任务（每天 14:40）

@@ -31,5 +31,8 @@ jobs:
       - name: 窗口提取/合并算法
         run: node tools/windows-test.mjs
 
+      - name: 小时超标判定
+        run: node tools/hourly-alarm-test.mjs
+
       - name: 看门狗逻辑
         run: node tools/watchdog-test.mjs

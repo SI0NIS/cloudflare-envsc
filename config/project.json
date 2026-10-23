@@ -9,5 +9,14 @@
     "autoMarkMinMinutes": 15,
     "autoMarkMinPerHour": 15
   },
+  "hourlyAlarm": {
+    "enabled": true,
+    "compare": "auto",
+    "baseO2": null,
+    "o2Code": "S01",
+    "minRatio": 1.0,
+    "requireValid": true,
+    "maxItemsPerPush": 10
+  },
   "pushWindow": { "startHour": 15, "endHour": 21 }
 }
