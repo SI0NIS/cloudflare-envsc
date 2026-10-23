@@ -39,9 +39,18 @@ async function runInner(env) {
   const psId = env.CNEMC_PSID || PROJECT.psId;
 
   // 去重（KV）
+  // 2026-10-23：降级推送可升级一次——若上次推送仅公开平台小时级（marksSource=public，通常是本机同步
+  // 晚于 15:00 才完成/当天同步失败），本次已拿到分钟级 KV 标记时允许再推一次完整版；
+  // 升级后写 upgraded:true，后续整点不再重复。
   let done = null;
   try { done = await env.ENVSC_KV.get(day); } catch (e) { /* KV 异常不阻断 */ }
-  if (done) return { ok: true, action: 'skipped', date: day, reason: '当天已推送过' };
+  let upgrade = false;
+  if (done) {
+    let prev = null;
+    try { prev = JSON.parse(done); } catch (e) { prev = null; }
+    if (prev && prev.marksSource === 'public' && !prev.upgraded) upgrade = true;
+    else return { ok: true, action: 'skipped', date: day, reason: '当天已推送过' };
+  }
 
   let data;
   try {
@@ -94,6 +103,12 @@ async function runInner(env) {
 
   const { title, body } = buildText(data, j, marks);
 
+  // 升级重推的前提：本次确实拿到了分钟级 KV 标记；否则保持静默（不重复打扰降级通知）。
+  const hasKvMarks = /kv/i.test(String(marks.source || ''));
+  if (upgrade && !hasKvMarks) {
+    return { ok: true, action: 'skipped', date: day, reason: '上次为降级推送，但本次仍无分钟级标记', marks: { source: marks.source || null } };
+  }
+
   // 标记缺失可见化（2026-10-22 波次4）：有异常内容但分钟级 KV 未同步（source=public）时，
   // 在正文尾部显式提示，把「静默降级为小时级」变成可见，方便事后核对。
   let pushBody = body;
@@ -114,7 +129,11 @@ async function runInner(env) {
   const anyOk = pushed.some((p) => p.ok);
   if (anyOk) {
     try {
-      await env.ENVSC_KV.put(day, JSON.stringify({ unitRate: j.unitRate, isCase1: j.isCase1, at: new Date().toISOString() }));
+      // marksSource/upgraded 用于「降级推送可升级一次」判定（2026-10-23）
+      await env.ENVSC_KV.put(day, JSON.stringify({
+        unitRate: j.unitRate, isCase1: j.isCase1, at: new Date().toISOString(),
+        marksSource: marks.source || null, ...(upgrade ? { upgraded: true } : {}),
+      }));
     } catch (e) { /* 去重写失败不影响推送结果 */ }
   }
 

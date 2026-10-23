@@ -102,7 +102,9 @@ async function ensureCookie() {
   log(`cookie 无效/过期（${fp(cur)}）→ 调用自动登录续期…`);
   try {
     execFileSync(process.execPath, [path.join(__dirname, 'auto-login', 'auto-login.cjs')], {
-      timeout: 240000, stdio: 'ignore',
+      // 超时 10 分钟：auto-login 内含 3 个 cycle（每次含页面加载 + 最多 10 轮滑块），
+      // 企业端慢时单次尝试可达 ~90s，240s 会在第 3 次尝试中途被杀（2026-10-23 实测 ETIMEDOUT）。
+      timeout: 600000, stdio: 'ignore',
       env: { ...process.env, HTTP_PROXY: '', HTTPS_PROXY: '', http_proxy: '', https_proxy: '', ALL_PROXY: '', all_proxy: '' },
     });
     log('auto-login 子进程已返回');
