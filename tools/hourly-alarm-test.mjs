@@ -3,7 +3,7 @@
 // 运行：node tools/hourly-alarm-test.mjs
 import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
-const { evalFactor, evalRow, judgePoint, judgeTiers, describeTier } = require('./local-sync/lib/exceed.js');
+const { evalFactor, evalRow, judgePoint, judgeTiers, judgeRange, describeTier } = require('./local-sync/lib/exceed.js');
 
 const results = [];
 function check(name, cond, detail) {
@@ -183,6 +183,36 @@ const opts = { compare: 'avg_value', minRatio: 1, requireValid: true, o2Code: 'S
   check('㉖ A级严于排放标准（001、508 必须更小）',
     Number(A['001']) < Number(L['001']) && Number(A['508']) < Number(L['508']),
     `A=${JSON.stringify(A)} L=${JSON.stringify(L)}`);
+}
+
+// ㉗ 点位级法定限值：火电 SO2 35 / NOx 50，废水 pH 6-9 / COD 50 / 氨氮 5
+{
+  const fs = await import('node:fs');
+  const std = JSON.parse(fs.readFileSync(new URL('../config/standards.json', import.meta.url), 'utf8'));
+  const L = std.legal || {};
+  check('㉗ 火电两机组：SO2=35、NOx=50',
+    Number(L['3号机组']?.['002']) === 35 && Number(L['3号机组']?.['003']) === 50
+    && Number(L['1号2号机组']?.['002']) === 35 && Number(L['1号2号机组']?.['003']) === 50,
+    JSON.stringify({ a: L['3号机组'], b: L['1号2号机组'] }));
+  check('㉘ 总排口：pH=6-9、COD=50、氨氮=5',
+    String(L['总排口']?.['001']) === '6-9' && Number(L['总排口']?.['011']) === 50 && Number(L['总排口']?.['060']) === 5,
+    JSON.stringify(L['总排口']));
+}
+// ㉙ pH 区间判定
+{
+  const inRange = judgeRange(8.015, 8.09, null, '6-9', '数据有效', { requireValid: true });
+  check('㉙ pH 8.015~8.09 / 6-9 → 正常', inRange && !inRange.exceeded && inRange.range, JSON.stringify(inRange));
+  const low = judgeRange(5.5, 6.2, null, '6-9', '数据有效', { requireValid: true });
+  check('㉚ pH 5.5~6.2 / 6-9 → 超下限', low && low.exceedLegal && low.exceeded, JSON.stringify(low));
+  const high = judgeRange(8.8, 9.2, null, '6-9', '数据有效', { requireValid: true });
+  check('㉛ pH 8.8~9.2 / 6-9 → 超上限', high && high.exceedLegal && high.exceeded, JSON.stringify(high));
+  const bad = judgeRange(8, 9, null, '6-9', '--', { requireValid: true });
+  check('㉜ flag=-- → pH 不判超标', bad && !bad.exceeded, JSON.stringify(bad));
+}
+// ㉝ 火电 SO2 40：超配置排放标准 35（若按平台 100 则不会报）
+{
+  const r = judgeTiers(40, 40, null, 35, '数据有效', { useZs: true, minRatio: 1, requireValid: true });
+  check('㉝ SO2 40 / 排放35 → 超标', r && r.exceedLegal && r.tier === 'legal', JSON.stringify(r));
 }
 
 const failed = results.filter((r) => !r.pass);

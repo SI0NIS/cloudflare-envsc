@@ -20,7 +20,7 @@ const fs = require('fs');
 const path = require('path');
 const { execFileSync } = require('child_process');
 const { createLogger } = require('./lib/log');
-const { judgeTiers, describeTier, num, cell } = require('./lib/exceed');
+const { judgeTiers, judgeRange, describeTier, parseStandard, num, cell } = require('./lib/exceed');
 
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
 const RUNTIME = path.join(__dirname, 'runtime');
@@ -49,9 +49,11 @@ const TIER_A = STD_TABLE.a || (STD_TABLE._gas ? { label: 'A级标准', _gas: STD
 const TIER_LEGAL = STD_TABLE.legal || null;
 function tierStd(tier, mpName, code, isGas) {
   if (!tier) return null;
-  const pick = (obj) => (obj && obj[code] != null ? Number(obj[code]) : null);
-  for (const n of [pick(tier[mpName]), isGas ? pick(tier._gas) : null, pick(tier['*'])]) {
-    if (Number.isFinite(n) && n > 0) return n;
+  const pick = (obj) => (obj && obj[code] != null ? obj[code] : null);
+  for (const raw of [pick(tier[mpName]), isGas ? pick(tier._gas) : null, pick(tier['*'])]) {
+    if (raw == null) continue;
+    const p = parseStandard(raw);
+    if (p) return p.range ? p.text : p.min;
   }
   return null;
 }
@@ -172,13 +174,20 @@ async function getPointFactors(cookie, mp) {
 
 function buildProps(codes) {
   const parts = ['data_time'];
-  for (const c of codes) parts.push(`avg_value_${c}`, `outlet_standard_${c}`, `flag_${c}`);
+  for (const c of codes) parts.push(`avg_value_${c}`, `min_value_${c}`, `max_value_${c}`, `outlet_standard_${c}`, `flag_${c}`);
   return parts.join(',');
+}
+
+// data/list 的 mpType 与 getMpInfoByPsId 的 mpType 口径不同：
+// 2026-10-23 实测——废水点（getMpInfo mpType=4，如总排口 …124）必须用 mpType=1 查询，
+// 否则只返回标准值、数值全为 "--"；废气点（mpType=5）保持原值。
+function queryMpType(mp) {
+  return String(mp.mpType) === '4' ? '1' : String(mp.mpType);
 }
 
 async function getHourRows(cookie, mp, day, codes) {
   const qs = new URLSearchParams({
-    method: 'online-monitor/data/list', psId: PSID, id: mp.id, mpType: mp.mpType,
+    method: 'online-monitor/data/list', psId: PSID, id: mp.id, mpType: queryMpType(mp),
     dateType: '1', dateTime: `${day} 00:00:00,${day} 23:59:59`,
     isCity: '0', netWorkType: '1', normalKey: '0', industryType: '00', zs: '',
     pageNum: '1', pageSize: '200', filterItem: '', filterWork: 'false', sort: '0',
@@ -195,7 +204,7 @@ async function getHourRows(cookie, mp, day, codes) {
 // 该接口的 label/prop 字段用的是默认模板（不可靠），故用「实测值匹配」把行对齐到 factor code。
 async function getViewRows(cookie, mp, day) {
   const qs = new URLSearchParams({
-    method: '/online-monitor/view/list', psId: PSID, id: mp.id, mpType: String(mp.mpType),
+    method: '/online-monitor/view/list', psId: PSID, id: mp.id, mpType: queryMpType(mp),
     dateType: '1', dateTime: `${day} 00:00:00,${day} 23:59:59`,
     isCity: '0', netWorkType: '1', normalKey: '0', industryType: '00', zs: '',
     pageNum: '1', pageSize: '300', filterItem: '', filterWork: 'false', sort: '0', _t: String(Date.now()),
@@ -307,22 +316,41 @@ async function pushBark(title, body) {
         const row = rows.find((r) => String((r.data_time && r.data_time.item && r.data_time.item.label) || '').startsWith(prefix));
         if (!row) continue;
         // ① 实测/有效性 + 两层标准：
-        //    A 级 = 配置表；排放标准 = 平台 outlet_standard（缺失时用配置表 legal 层兜底）
+        //    A 级 = 配置表；排放标准 = 配置表优先（GB 限值），未配置时用平台 outlet_standard。
+        //    废水 pH 用 min_value/max_value 区间判定。
+        const isWater = String(mp.mpType) === '4';
         const perCode = {};
         for (const code of codes) {
           const v = num((cell(row, `avg_value_${code}`) || {}).label);
-          if (v == null) continue;
-          const sPlatform = num((cell(row, `outlet_standard_${code}`) || {}).label);
+          const minV = num((cell(row, `min_value_${code}`) || {}).label);
+          const maxV = num((cell(row, `max_value_${code}`) || {}).label);
+          const isRange = isWater && code === '001' && minV != null && maxV != null;
+          if (!isRange && v == null) continue;
+          const sPlatformRaw = (cell(row, `outlet_standard_${code}`) || {}).label;
+          const sPlatform = sPlatformRaw && String(sPlatformRaw).trim() !== '--' ? String(sPlatformRaw).trim() : null;
           const f = (cell(row, `flag_${code}`) || {}).label || '';
           const sA = tierStd(TIER_A, mp.name, code, isGas);
-          const sLegal = sPlatform != null ? sPlatform : tierStd(TIER_LEGAL, mp.name, code, isGas);
+          const sLocalLegal = tierStd(TIER_LEGAL, mp.name, code, isGas);
+          // 配置表优先（用于 GB 13223 / GB 21903 等法定限值覆盖平台值）
+          const sLegal = sLocalLegal != null ? sLocalLegal : sPlatform;
+          const stdLegalSource = sLocalLegal != null
+            ? (sPlatform != null && String(sLocalLegal) !== sPlatform ? '配置表(覆盖平台)' : '配置表')
+            : '平台';
           if (sA == null && sLegal == null) {
             // 工况参数（S0x/B0x）本身没有限值，不计入"缺标准"
             if (!/^[SB]\d{2}$/i.test(code)) missingStd.add(`${mp.name}/${code}`);
             continue;
           }
-          if (sA != null && sLegal != null && sA < sLegal) stdPairs.add(`${mp.name}/${code}：A级 ${sA} ＜ 排放 ${sLegal}`);
-          perCode[code] = { value: v, stdA: sA, stdLegal: sLegal, flag: f, stdLegalSource: sPlatform != null ? '平台' : '配置表' };
+          if (sA != null && sLegal != null) {
+            const na = Number(sA), nl = Number(sLegal);
+            if (Number.isFinite(na) && Number.isFinite(nl) && na < nl) {
+              stdPairs.add(`${mp.name}/${code}：A级 ${sA} ／ 排放 ${sLegal}`);
+            }
+          }
+          perCode[code] = {
+            value: isRange ? maxV : v, minV, maxV, isRange,
+            stdA: sA, stdLegal: sLegal, flag: f, stdLegalSource,
+          };
         }
         // ② 废气折算：view/list 的 avg_zs[hour]（数组下标 = 小时）；用实测值匹配到因子编码
         const zsByCode = {};
@@ -337,17 +365,22 @@ async function pushBark(title, body) {
             if (hit) zsByCode[hit[0]] = hz;
           }
         }
-        // ③ 判定：废气用折算（有则用）、废水用实测；同时比对两层标准
+        // ③ 判定：废气用折算（有则用）、废水用实测；pH 用区间；同时比对两层标准
         for (const [code, pc] of Object.entries(perCode)) {
-          const ev = judgeTiers(pc.value, zsByCode[code], pc.stdA, pc.stdLegal, pc.flag, {
-            requireValid: ALARM.requireValid,
-            minRatio: ALARM.minRatio,
-            useZs: isGas && ALARM.compare !== 'avg_value',
-          });
+          const ev = pc.isRange
+            ? judgeRange(pc.minV, pc.maxV, pc.stdA, pc.stdLegal, pc.flag, {
+              requireValid: ALARM.requireValid, minRatio: ALARM.minRatio,
+            })
+            : judgeTiers(pc.value, zsByCode[code], pc.stdA, pc.stdLegal, pc.flag, {
+              requireValid: ALARM.requireValid,
+              minRatio: ALARM.minRatio,
+              useZs: isGas && ALARM.compare !== 'avg_value',
+            });
           if (!ev) continue;
           checkedFactors++;
           if (verbose) {
-            log(`  [eval] ${hk.date} ${hk.hour}时 ${mp.name} ${code} 实测=${ev.value} 折算=${ev.zs == null ? '-' : ev.zs} 判定值=${Number(ev.judged.toFixed(3))} A级=${ev.stdA == null ? '-' : ev.stdA} 排放=${ev.stdLegal == null ? '-' : ev.stdLegal}(${pc.stdLegalSource}) rA=${ev.ratioA == null ? '-' : ev.ratioA.toFixed(3)} rL=${ev.ratioLegal == null ? '-' : ev.ratioLegal.toFixed(3)} flag=${ev.flag} valid=${ev.valid} usedZs=${ev.usedZs}`);
+            const shown = ev.range ? `${ev.valueMin}~${ev.valueMax}` : `${ev.value}${ev.zs == null ? '' : `(折算 ${ev.zs})`}`;
+            log(`  [eval] ${hk.date} ${hk.hour}时 ${mp.name} ${code} 值=${shown} A级=${ev.stdA == null ? '-' : ev.stdA} 排放=${ev.stdLegal == null ? '-' : ev.stdLegal}(${pc.stdLegalSource}) rA=${ev.ratioA == null ? '-' : ev.ratioA.toFixed(3)} rL=${ev.ratioLegal == null ? '-' : ev.ratioLegal.toFixed(3)} flag=${ev.flag} valid=${ev.valid}`);
           }
           if (!ev.exceeded) continue;
           const key = `${hk.date} ${hk.hour}`;
@@ -391,6 +424,7 @@ async function pushBark(title, body) {
   const maxItems = Number.isFinite(ALARM.maxItemsPerPush) ? ALARM.maxItemsPerPush : 10;
   const shown = fresh.slice(0, maxItems);
   const lines = shown.map((it) => {
+    if (it.range) return `· ${it.hourKey.slice(5)}时 ${it.mp} ${it.name} ${it.valueMin}~${it.valueMax}（${describeTier(it)}）`;
     const val = Number(it.judged.toFixed(3));
     const head = it.usedZs ? '折算 ' : '';
     const extra = it.usedZs ? `（实测 ${Number(it.value.toFixed(3))}）` : '';
@@ -401,7 +435,10 @@ async function pushBark(title, body) {
   const anyLegal = fresh.some((it) => it.exceedLegal);
   const title = `${anyLegal ? '⚠️ 小时超标' : '⚠️ A级预警'} ${fresh[0].hourKey.slice(0, 10)}`;
 
-  for (const it of shown) log(`EXCEED ${it.hourKey} ${it.mp} ${it.name}=${it.judged} A级=${it.stdA == null ? '-' : it.stdA} 排放=${it.stdLegal == null ? '-' : it.stdLegal} tier=${it.tier} flag=${it.flag}`);
+  for (const it of shown) {
+    const shownVal = it.range ? `${it.valueMin}~${it.valueMax}` : it.judged;
+    log(`EXCEED ${it.hourKey} ${it.mp} ${it.name}=${shownVal} A级=${it.stdA == null ? '-' : it.stdA} 排放=${it.stdLegal == null ? '-' : it.stdLegal} tier=${it.tier} flag=${it.flag}`);
+  }
 
   if (dryRun) {
     console.log(`\n[DRY-RUN] ${title}\n${body}\n`);

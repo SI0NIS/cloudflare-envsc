@@ -91,22 +91,46 @@ function judgePoint(value, zs, standard, flag, opt = {}) {
   };
 }
 
+// 解析标准值：单值（"50"）或区间（pH "6-9"）
+function parseStandard(v) {
+  if (v == null) return null;
+  const s = String(v).trim();
+  if (!s || s === '--' || s === '/') return null;
+  const m = s.match(/^(\d+(?:\.\d+)?)\s*[-~～至]\s*(\d+(?:\.\d+)?)$/);
+  if (m) {
+    const a = Number(m[1]), b = Number(m[2]);
+    if (Number.isFinite(a) && Number.isFinite(b) && b >= a) return { min: a, max: b, range: true, text: s };
+  }
+  const n = Number(s);
+  return Number.isFinite(n) ? { min: n, max: n, range: false, text: s } : null;
+}
+
 // 双层标准判定（2026-10-23）：A级绩效标准 + 排放标准
 //   stdA     = 重污染天气绩效分级 A 级限值（更严，缺失则 null）
-//   stdLegal = 平台 outlet_standard（排放标准，缺失则 null）
+//   stdLegal = 排放标准（平台 outlet_standard 或配置表）
 //   返回 exceedA / exceedLegal / tier('legal'|'a'|null)，供推送说明「超出哪个标准」。
 function judgeTiers(value, zs, stdA, stdLegal, flag, opt = {}) {
-  const v = num(value), z = num(zs), sa = num(stdA), sl = num(stdLegal);
-  if (v == null) return null;
-  if (sa == null && sl == null) return null;
+  const v = num(value), z = num(zs);
+  const pa = parseStandard(stdA), pl = parseStandard(stdLegal);
+  if (v == null || (!pa && !pl)) return null;
   const valid = opt.requireValid === false ? true : flag === '数据有效';
   const useZs = opt.useZs === true && z != null;
   const judged = useZs ? z : v;
   const minRatio = Number.isFinite(opt.minRatio) ? opt.minRatio : 1;
-  const ratioA = sa != null ? judged / sa : null;
-  const ratioLegal = sl != null ? judged / sl : null;
-  const exceedA = valid && ratioA != null && ratioA > minRatio;
-  const exceedLegal = valid && ratioLegal != null && ratioLegal > minRatio;
+
+  const evalOne = (p) => {
+    if (!p) return { ratio: null, exceeded: false };
+    if (p.range) {
+      if (judged < p.min) return { ratio: p.min / judged, exceeded: true };
+      if (judged > p.max) return { ratio: judged / p.max, exceeded: true };
+      return { ratio: 1, exceeded: false };
+    }
+    const ratio = judged / p.min;
+    return { ratio, exceeded: ratio > minRatio };
+  };
+  const ea = evalOne(pa), el = evalOne(pl);
+  const exceedA = valid && ea.exceeded;
+  const exceedLegal = valid && el.exceeded;
   const tier = exceedLegal ? 'legal' : (exceedA ? 'a' : null);
   return {
     value: v,
@@ -114,10 +138,51 @@ function judgeTiers(value, zs, stdA, stdLegal, flag, opt = {}) {
     judged,
     usedZs: useZs,
     valid,
-    stdA: sa,
-    stdLegal: sl,
-    ratioA,
-    ratioLegal,
+    stdA: pa ? (pa.range ? pa.text : pa.min) : null,
+    stdLegal: pl ? (pl.range ? pl.text : pl.min) : null,
+    ratioA: ea.ratio,
+    ratioLegal: el.ratio,
+    exceedA,
+    exceedLegal,
+    tier,
+    exceeded: !!(exceedA || exceedLegal),
+    flag: flag || '',
+  };
+}
+
+// 区间型因子（pH）：用最小值/最大值与区间标准比较
+function judgeRange(minV, maxV, stdA, stdLegal, flag, opt = {}) {
+  const a = num(minV), b = num(maxV);
+  const pa = parseStandard(stdA), pl = parseStandard(stdLegal);
+  if (a == null || b == null || (!pa && !pl)) return null;
+  const valid = opt.requireValid === false ? true : flag === '数据有效';
+  const evalOne = (p) => {
+    if (!p) return { ratio: null, exceeded: false, bound: null };
+    if (p.range) {
+      if (a < p.min) return { ratio: p.min / a, exceeded: true, bound: 'low' };
+      if (b > p.max) return { ratio: b / p.max, exceeded: true, bound: 'high' };
+      return { ratio: 1, exceeded: false, bound: null };
+    }
+    if (b > p.min) return { ratio: b / p.min, exceeded: true, bound: 'high' };
+    return { ratio: 1, exceeded: false, bound: null };
+  };
+  const ea = evalOne(pa), el = evalOne(pl);
+  const exceedA = valid && ea.exceeded;
+  const exceedLegal = valid && el.exceeded;
+  const tier = exceedLegal ? 'legal' : (exceedA ? 'a' : null);
+  const low = el.bound === 'low' || ea.bound === 'low';
+  return {
+    value: b,
+    valueMin: a,
+    valueMax: b,
+    range: true,
+    judged: low ? a : b,
+    usedZs: false,
+    valid,
+    stdA: pa ? (pa.range ? pa.text : pa.min) : null,
+    stdLegal: pl ? (pl.range ? pl.text : pl.min) : null,
+    ratioA: ea.ratio,
+    ratioLegal: el.ratio,
     exceedA,
     exceedLegal,
     tier,
@@ -130,6 +195,10 @@ function judgeTiers(value, zs, stdA, stdLegal, flag, opt = {}) {
 //   两层均超 → 先写排放标准（法定超标），并注明 A 级亦超；
 //   仅超 A 级 → 写明「未超排放标准」，避免误读为法定超标。
 function describeTier(it) {
+  if (it.range) {
+    if (it.exceedLegal) return `超排放标准 ${it.stdLegal}`;
+    return `超A级标准 ${it.stdA}`;
+  }
   const pA = it.ratioA != null ? Math.round((it.ratioA - 1) * 100) : null;
   const pL = it.ratioLegal != null ? Math.round((it.ratioLegal - 1) * 100) : null;
   if (it.exceedLegal) {
@@ -152,4 +221,4 @@ function evalRow(row, codes, opt = {}) {
   return out;
 }
 
-module.exports = { evalFactor, evalRow, judgePoint, judgeTiers, describeTier, o2Correct, num, rowLabel, cell };
+module.exports = { evalFactor, evalRow, judgePoint, judgeTiers, judgeRange, describeTier, parseStandard, o2Correct, num, rowLabel, cell };

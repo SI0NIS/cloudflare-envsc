@@ -241,8 +241,8 @@ The platform only offers query APIs — no push. A local runner closes the loop:
 | Window | The last **2 completed hours** (late data is caught on the next run); `--date/--hour` for manual checks |
 | Sources | Enterprise `online-monitor/data/list` (measured value / standard / validity) + `online-monitor/view/list` (converted series); factor codes from `/monitoritem/pollutant/list` |
 | Factor codes | Resolved at runtime (**NMHC=508**, PM=001, SO₂=002, NOₓ=003, COD=011, ammonia nitrogen=060) instead of hard-coded guesses |
-| Rule | **Gas uses the converted value**; **wastewater uses the measured value** (no conversion exists); only `数据有效` rows are judged; strictly greater than the standard (`minRatio` configurable) |
-| Two tiers | **Class A** (`config/standards.json` → `a`) and **emission standard** (platform `outlet_standard_<code>`, falling back to the `legal` section). Current Class A: PM **10**, NMHC **30**; emission standard: PM 30, NMHC **100** |
+| Rule | **Gas uses the converted value**; **wastewater uses the measured value** (no conversion exists); wastewater pH uses `min_value`/`max_value` range judging; only `数据有效` rows are judged; strictly greater than the standard (`minRatio` configurable) |
+| Two tiers | **Class A** (`config/standards.json` → `a`) and **emission standard** (configured value first, then platform `outlet_standard`). Class A: PM **10**, NMHC **30**; emission standard: SO₂ **35**, NOₓ **50** for units 3 / 1-2 (GB 13223-2011 ultra-low), PM 30, NMHC 100; outfall pH **6~9**, COD **50**, ammonia nitrogen **5** (GB 21903-2008 Table 3 special limits) |
 | Wording | A-level only → `超A级标准 30，超 x%；未超排放标准 100` (title “A级预警”); both → `超排放标准 100，超 x%；A级标准 30 亦超` (title “小时超标”) |
 | Dedup | KV `alarm:<date>:<hour>:<point>:<factor>:<tier>` (3-day TTL); an A-level warning escalates to a separate exceedance alert |
 | Push | Bark (`group=小时超标`, `timeSensitive`), one message per run |
