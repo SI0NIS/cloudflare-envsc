@@ -3,7 +3,7 @@
 // 运行：node tools/hourly-alarm-test.mjs
 import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
-const { evalFactor, evalRow, judgePoint } = require('./local-sync/lib/exceed.js');
+const { evalFactor, evalRow, judgePoint, judgeTiers, describeTier } = require('./local-sync/lib/exceed.js');
 
 const results = [];
 function check(name, cond, detail) {
@@ -108,17 +108,67 @@ const opts = { compare: 'avg_value', minRatio: 1, requireValid: true, o2Code: 'S
   check('⑭ flag=-- 且 requireValid → 不判超标', r && !r.exceeded && r.valid === false, JSON.stringify(r));
 }
 
-// ⑮ 标准表（重污染天气绩效分级 A 级）：颗粒物 10、非甲烷总烃 30，且优先于平台限值
+// ⑮ 双层标准：A 级严、排放标准宽（2026-10-23 用户要求说明超出哪个标准）
+{
+  // 颗粒物折算 12：A级 10 超、排放 30 未超 → 只算 A 级预警
+  const r = judgeTiers(12, 12, 10, 30, '数据有效', { useZs: true, minRatio: 1, requireValid: true });
+  check('⑮ 12 / A级10 / 排放30 → 仅超A级（tier=a）', r && r.exceedA && !r.exceedLegal && r.tier === 'a', JSON.stringify(r));
+}
+{
+  // 非甲烷总烃折算 35：A级 30 超、排放 100 未超
+  const r = judgeTiers(35, 35, 30, 100, '数据有效', { useZs: true, minRatio: 1, requireValid: true });
+  check('⑯ 35 / A级30 / 排放100 → 仅超A级', r && r.exceedA && !r.exceedLegal && r.tier === 'a'
+    && Math.abs(r.ratioLegal - 0.35) < 1e-9, JSON.stringify(r));
+}
+{
+  // 折算 120：两层都超 → tier=legal
+  const r = judgeTiers(120, 120, 30, 100, '数据有效', { useZs: true, minRatio: 1, requireValid: true });
+  check('⑰ 120 / A级30 / 排放100 → 两层均超（tier=legal）', r && r.exceedA && r.exceedLegal && r.tier === 'legal', JSON.stringify(r));
+}
+{
+  // 只有 A 级标准（平台未配置排放标准）
+  const r = judgeTiers(35, 35, 30, null, '数据有效', { useZs: true, minRatio: 1, requireValid: true });
+  check('⑱ 平台无排放标准 → 仍按A级判定（stdLegal=null）', r && r.exceedA && r.stdLegal === null && r.tier === 'a', JSON.stringify(r));
+}
+{
+  // 只有排放标准（该因子无 A 级值）
+  const r = judgeTiers(120, 120, null, 100, '数据有效', { useZs: true, minRatio: 1, requireValid: true });
+  check('⑲ 仅排放标准 → 超排放（tier=legal）', r && !r.exceedA && r.exceedLegal && r.tier === 'legal', JSON.stringify(r));
+}
+{
+  // 数据无效：两层都不判
+  const r = judgeTiers(120, 120, 30, 100, '--', { useZs: true, minRatio: 1, requireValid: true });
+  check('⑳ flag=-- 且 requireValid → 两层都不判超标', r && !r.exceedA && !r.exceedLegal && !r.exceeded, JSON.stringify(r));
+}
+
+// ㉑ 配置表：A 级颗粒物 10、非甲烷总烃 508=30（编码来自 /monitoritem/pollutant/list）
 {
   const fs = await import('node:fs');
   const std = JSON.parse(fs.readFileSync(new URL('../config/standards.json', import.meta.url), 'utf8'));
-  check('⑮ standards.json：_mode=override（优先于平台限值）', std._mode === 'override', std._mode);
-  check('⑯ A级限值：颗粒物 001=10、非甲烷总烃 005=30',
-    Number(std._gas && std._gas['001']) === 10 && Number(std._gas && std._gas['005']) === 30,
-    JSON.stringify(std._gas));
-  const r = judgePoint(12, 12, Number(std._gas['001']), '数据有效', { useZs: true, minRatio: 1, requireValid: true });
-  check('⑰ 颗粒物折算 12 / A级 10 → 超标（若按平台 30 则不会报）',
-    r && r.exceeded && Math.abs(r.ratio - 1.2) < 1e-9, JSON.stringify(r));
+  const gasA = (std.a && std.a._gas) || {};
+  check('㉑ standards.json：A级 001=10、508=30（双层结构）',
+    Number(gasA['001']) === 10 && Number(gasA['508']) === 30 && !!std.legal,
+    JSON.stringify({ a: gasA, legal: !!std.legal }));
+}
+
+// ㉒ 文案：仅超 A 级 → 明确「未超排放标准」
+{
+  const r = judgeTiers(35, 35, 30, 100, '数据有效', { useZs: true, minRatio: 1, requireValid: true });
+  const t = describeTier(r);
+  check('㉒ 仅超A级文案：超A级标准 30…未超排放标准 100',
+    /超A级标准 30/.test(t) && /未超排放标准 100/.test(t), t);
+}
+// ㉓ 文案：两层均超 → 先写排放标准（法定超标），注明 A 级亦超
+{
+  const r = judgeTiers(120, 120, 30, 100, '数据有效', { useZs: true, minRatio: 1, requireValid: true });
+  const t = describeTier(r);
+  check('㉓ 两层均超文案：超排放标准 100…A级标准 30 亦超',
+    /超排放标准 100/.test(t) && /A级标准 30 亦超/.test(t), t);
+}
+// ㉔ 平台未配置排放标准 → 文案注明
+{
+  const r = judgeTiers(35, 35, 30, null, '数据有效', { useZs: true, minRatio: 1, requireValid: true });
+  check('㉔ 无排放标准文案：平台未配置排放标准', /平台未配置排放标准/.test(describeTier(r)), describeTier(r));
 }
 
 const failed = results.filter((r) => !r.pass);

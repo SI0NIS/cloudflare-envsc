@@ -234,14 +234,15 @@ npx wrangler tail                            # 观察定时执行的实时日志
 |---|---|
 | 触发 | Windows 计划任务 `ENVSC-Hourly-Alarm`，每小时 **:20** 运行 `tools/local-sync/hourly-alarm.cjs` |
 | 覆盖时段 | 最近 **2 个已完成小时**（数据晚到可在下一小时补上）；也支持 `--date/--hour` 指定 |
-| 数据源 | 企业端 `online-monitor/data/list`（小时行的实测值/标准值/有效性）+ `online-monitor/view/list`（折算值序列） |
+| 数据源 | 企业端 `online-monitor/data/list`（小时行的实测值/标准值/有效性）+ `online-monitor/view/list`（折算值序列）；因子清单取自 `/monitoritem/pollutant/list` |
+| 因子编码 | 由企业端接口动态获取（**非甲烷总烃=508、颗粒物=001、二氧化硫=002、氮氧化物=003、化学需氧量=011、氨氮=060**），不再硬编码猜测 |
 | 判定口径 | **废气用折算值**、**废水用实测值**（废水无折算）；仅「数据有效」参与；严格大于标准（`minRatio` 可调） |
-| 标准值 | `config/standards.json` **优先**（`_mode=override`，用于重污染天气绩效分级 A 级等更严口径）；表中没有的因子才用平台 `outlet_standard` |
-| 当前限值口径 | **A 级**：废气颗粒物 **10 mg/m³**、非甲烷总烃 **30 mg/m³**（`_gas` 段）；二氧化硫/氮氧化物等仍用平台值 |
-| 去重 | KV `alarm:<日期>:<小时>:<监测点>:<因子>`（TTL 3 天） |
-| 推送 | Bark（`group=小时超标`，`level=timeSensitive`），一次运行合并一条；A 级表判定的会标注「A级标准」 |
-| 状态 | KV `last-hourly-alarm`（checked / exceeded / pushed / stdOverrides / missingStd） |
-| 配置 | `config/project.json` → `hourlyAlarm`；限值 → `config/standards.json`（`_mode` 可切 override/fallback） |
+| 两层标准 | **A 级绩效**（`config/standards.json` → `a`）与**排放标准**（平台 `outlet_standard_<code>`，缺失时用 `legal` 层）。当前 A 级：颗粒物 **10**、非甲烷总烃 **30**；排放标准：颗粒物 30、非甲烷总烃 **100** |
+| 文案区分 | 仅超 A 级 → `超A级标准 30，超 x%；未超排放标准 100`（标题「A级预警」）；两层均超 → `超排放标准 100，超 x%；A级标准 30 亦超`（标题「小时超标」） |
+| 去重 | KV `alarm:<日期>:<小时>:<监测点>:<因子>:<层级>`（TTL 3 天）；A 级预警升级为排放超标时会再推一次 |
+| 推送 | Bark（`group=小时超标`，`level=timeSensitive`），一次运行合并一条 |
+| 状态 | KV `last-hourly-alarm`（checked / exceeded / exceededLegal / exceededA / pushed / missingStd） |
+| 配置 | `config/project.json` → `hourlyAlarm`；两层限值 → `config/standards.json` |
 
 手动演练：
 

@@ -239,13 +239,14 @@ The platform only offers query APIs — no push. A local runner closes the loop:
 |---|---|
 | Trigger | Windows task `ENVSC-Hourly-Alarm`, runs `tools/local-sync/hourly-alarm.cjs` at **:20 every hour** |
 | Window | The last **2 completed hours** (late data is caught on the next run); `--date/--hour` for manual checks |
-| Sources | Enterprise `online-monitor/data/list` (measured value / standard / validity) + `online-monitor/view/list` (converted series) |
+| Sources | Enterprise `online-monitor/data/list` (measured value / standard / validity) + `online-monitor/view/list` (converted series); factor codes from `/monitoritem/pollutant/list` |
+| Factor codes | Resolved at runtime (**NMHC=508**, PM=001, SO₂=002, NOₓ=003, COD=011, ammonia nitrogen=060) instead of hard-coded guesses |
 | Rule | **Gas uses the converted value**; **wastewater uses the measured value** (no conversion exists); only `数据有效` rows are judged; strictly greater than the standard (`minRatio` configurable) |
-| Standards | `config/standards.json` takes **precedence** (`_mode=override`, for stricter rules such as the Class-A performance grading); platform `outlet_standard` is used only for factors absent from the table |
-| Current limits | **Class A**: particulate matter **10 mg/m³**, NMHC **30 mg/m³** (the `_gas` section); SO₂/NOₓ etc. still use platform values |
-| Dedup | KV `alarm:<date>:<hour>:<point>:<factor>` (3-day TTL) |
-| Push | Bark (`group=小时超标`, `timeSensitive`), one message per run; entries judged by the Class-A table are labelled `A级标准` |
-| Status | KV `last-hourly-alarm` (checked / exceeded / pushed / stdOverrides / missingStd) |
+| Two tiers | **Class A** (`config/standards.json` → `a`) and **emission standard** (platform `outlet_standard_<code>`, falling back to the `legal` section). Current Class A: PM **10**, NMHC **30**; emission standard: PM 30, NMHC **100** |
+| Wording | A-level only → `超A级标准 30，超 x%；未超排放标准 100` (title “A级预警”); both → `超排放标准 100，超 x%；A级标准 30 亦超` (title “小时超标”) |
+| Dedup | KV `alarm:<date>:<hour>:<point>:<factor>:<tier>` (3-day TTL); an A-level warning escalates to a separate exceedance alert |
+| Push | Bark (`group=小时超标`, `timeSensitive`), one message per run |
+| Status | KV `last-hourly-alarm` (checked / exceeded / exceededLegal / exceededA / pushed / missingStd) |
 
 Manual dry run:
 

@@ -20,7 +20,7 @@ const fs = require('fs');
 const path = require('path');
 const { execFileSync } = require('child_process');
 const { createLogger } = require('./lib/log');
-const { judgePoint, num, cell } = require('./lib/exceed');
+const { judgeTiers, describeTier, num, cell } = require('./lib/exceed');
 
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
 const RUNTIME = path.join(__dirname, 'runtime');
@@ -39,16 +39,18 @@ function loadJson(file, fallback) {
 }
 const CFG = loadJson(CONFIG_FILE, {});
 const PROJECT = loadJson(path.join(REPO_ROOT, 'config', 'project.json'), {});
-// 标准限值表（config/standards.json）
-//   _mode=override：本表优先于平台 outlet_standard（绩效分级 A 级等更严口径必须覆盖，
-//                   例如平台给颗粒物 30，A 级要求 10）；
-//   _mode=fallback：仅当平台未返回标准值时才兜底。
+// 两层标准（config/standards.json）
+//   a     = 重污染天气绩效分级 A 级（更严，如颗粒物 10、非甲烷总烃 30）
+//   legal = 排放标准（优先用平台 outlet_standard_<code>，平台未配置时用本表）
 //   查找顺序：监测点名 → _gas（废气通用，mpType≠4）→ '*'。
 const STD_TABLE = loadJson(process.env.ENVSC_STANDARDS_FILE || path.join(REPO_ROOT, 'config', 'standards.json'), {});
-const STD_MODE = STD_TABLE._mode === 'fallback' ? 'fallback' : 'override';
-function stdFromTable(mpName, code, isGas) {
+// 兼容旧格式（_mode/_gas）：视为 A 级层
+const TIER_A = STD_TABLE.a || (STD_TABLE._gas ? { label: 'A级标准', _gas: STD_TABLE._gas, '*': STD_TABLE['*'] } : null);
+const TIER_LEGAL = STD_TABLE.legal || null;
+function tierStd(tier, mpName, code, isGas) {
+  if (!tier) return null;
   const pick = (obj) => (obj && obj[code] != null ? Number(obj[code]) : null);
-  for (const n of [pick(STD_TABLE[mpName]), isGas ? pick(STD_TABLE._gas) : null, pick(STD_TABLE['*'])]) {
+  for (const n of [pick(tier[mpName]), isGas ? pick(tier._gas) : null, pick(tier['*'])]) {
     if (Number.isFinite(n) && n > 0) return n;
   }
   return null;
@@ -69,8 +71,8 @@ const PSID = CNEMC.psid || PROJECT.psId || '654000000031';
 
 // 因子编码 → 名称（优先 runtime 缓存，按 mpId 索引；缓存由每日同步写入）
 const FALLBACK_NAMES = {
-  '001': '颗粒物', '002': '二氧化硫', '003': '氮氧化物', '005': '非甲烷总烃',
-  '011': '化学需氧量', '012': '氨氮',
+  '001': '颗粒物', '002': '二氧化硫', '003': '氮氧化物',
+  '011': '化学需氧量', '060': '氨氮', '508': '非甲烷总烃',
   S01: '氧含量', S02: '流速', S03: '温度', S05: '湿度', S08: '压力', B01: '流量', B02: '流量',
 };
 const NAMES = loadJson(NAMES_FILE, {});
@@ -149,27 +151,43 @@ async function getMps(cookie) {
   return (j.data || []).map((m) => ({ id: m.id, name: m.mpName, mpType: m.mpType }));
 }
 
-async function getHourRows(cookie, mp, day) {
+// 因子清单：优先向企业端 /monitoritem/pollutant/list 取（权威：code↔名称↔单位），
+// 失败时退回默认编码表。2026-10-23 实测：非甲烷总烃=508、氨氮=060（此前误用 005/012）。
+const DEFAULT_CODES = ['001', '002', '003', '011', '060', '508', 'B01', 'B02', 'S01', 'S02', 'S03', 'S04', 'S05', 'S06', 'S07', 'S08'];
+async function getPointFactors(cookie, mp) {
+  try {
+    const qs = new URLSearchParams({ method: '/monitoritem/pollutant/list', mpId: mp.id, mpType: String(mp.mpType), _t: String(Date.now()) });
+    const r = await fetch(`${ROUTER}?${qs}`, { headers: H(cookie) });
+    const j = JSON.parse(await r.text());
+    const arr = Array.isArray(j.data) ? j.data : [];
+    const list = arr.filter((x) => x && x.code).map((x) => ({ code: String(x.code), name: x.name || '', unit: x.unit || '' }));
+    if (!list.length) throw new Error('空清单');
+    log(`  因子清单 ${mp.name}：${list.map((x) => `${x.code}${x.name ? `(${x.name})` : ''}`).join(' ')}`);
+    return list;
+  } catch (e) {
+    log(`WARN ${mp.name} 因子清单取数失败：${e.message}（退回默认编码）`);
+    return null;
+  }
+}
+
+function buildProps(codes) {
+  const parts = ['data_time'];
+  for (const c of codes) parts.push(`avg_value_${c}`, `outlet_standard_${c}`, `flag_${c}`);
+  return parts.join(',');
+}
+
+async function getHourRows(cookie, mp, day, codes) {
   const qs = new URLSearchParams({
     method: 'online-monitor/data/list', psId: PSID, id: mp.id, mpType: mp.mpType,
     dateType: '1', dateTime: `${day} 00:00:00,${day} 23:59:59`,
     isCity: '0', netWorkType: '1', normalKey: '0', industryType: '00', zs: '',
     pageNum: '1', pageSize: '200', filterItem: '', filterWork: 'false', sort: '0',
-    // 自动带上所有 avg_value_* / outlet_standard_* / flag_*（按因子编码）
-    props: buildProps(), _t: String(Date.now()),
+    props: buildProps(codes), _t: String(Date.now()),
   });
   const r = await fetch(`${ROUTER}?${qs}`, { headers: H(cookie) });
   const j = JSON.parse(await r.text());
   if (String(j.code) !== '200') throw new Error(`data/list code=${j.code}`);
   return (j.data && j.data.rows) || [];
-}
-
-// 由已知因子编码生成 props（含全部常见 code；接口对未知字段返回 "--"，无副作用）
-const CODES = ['001', '002', '003', '004', '005', '011', '012', 'S01', 'S02', 'S03', 'S04', 'S05', 'S06', 'S07', 'S08', 'B01', 'B02'];
-function buildProps() {
-  const parts = ['data_time'];
-  for (const c of CODES) parts.push(`avg_value_${c}`, `outlet_standard_${c}`, `flag_${c}`);
-  return parts.join(',');
 }
 
 // 图表序列接口：按因子返回 24 个小时点（dateType=1）的实测/折算数组。
@@ -251,14 +269,32 @@ async function pushBark(title, body) {
 
   // 按日期取小时行（每个日期只取一次/点）
   const dates = [...new Set(hourKeys.map((h) => h.date))];
+  const factorMap = new Map(); // mpId -> [{code,name,unit}]（每个监测点只问一次）
+  for (const mp of mps) factorMap.set(mp.id, await getPointFactors(cookie, mp));
+  // 企业端因子名并入缓存（供后续运行/排查；失败不影响主流程）
+  let namesChanged = false;
+  for (const mp of mps) {
+    const factors = factorMap.get(mp.id);
+    if (!factors) continue;
+    const m = { ...(NAMES[mp.id] || {}) };
+    for (const f of factors) if (f.code && f.name && m[f.code] !== f.name) { m[f.code] = f.name; namesChanged = true; }
+    NAMES[mp.id] = m;
+  }
+  if (namesChanged && !dryRun) {
+    try { fs.writeFileSync(NAMES_FILE, JSON.stringify(NAMES, null, 1), 'utf8'); } catch (e) { log(`WARN 因子名缓存写入失败：${e.message}`); }
+  }
   const hitByHour = new Map(); // "date hour" -> [{mp, code, ...}]
-  const missingStd = new Set(); // 有数值但无标准值（无法判定）的因子
-  const stdDiff = new Set(); // 平台标准值与本地标准表不一致（按本地表判定）
+  const missingStd = new Set(); // 有数值但两层标准都没有（无法判定）的因子
+  const stdPairs = new Set(); // A 级严于排放标准的因子（用于日志说明）
   let checkedFactors = 0;
   for (const day of dates) {
     for (const mp of mps) {
+      const factors = factorMap.get(mp.id);
+      const codes = factors ? factors.map((f) => f.code) : DEFAULT_CODES;
+      const nameByCode = {};
+      if (factors) for (const f of factors) if (f.name) nameByCode[f.code] = f.name;
       let rows;
-      try { rows = await getHourRows(cookie, mp, day); }
+      try { rows = await getHourRows(cookie, mp, day, codes); }
       catch (e) { log(`WARN ${day} ${mp.name} 取数失败：${e.message}`); continue; }
       const isGas = String(mp.mpType) !== '4'; // mpType=4 为废水（无折算）；其余按废气
       let viewRows = null;
@@ -270,28 +306,23 @@ async function pushBark(title, body) {
         const prefix = `${day} ${String(hk.hour).padStart(2, '0')}`;
         const row = rows.find((r) => String((r.data_time && r.data_time.item && r.data_time.item.label) || '').startsWith(prefix));
         if (!row) continue;
-        // ① 实测/标准/有效性（按因子编码，来自 data/list，逐字段可靠）
+        // ① 实测/有效性 + 两层标准：
+        //    A 级 = 配置表；排放标准 = 平台 outlet_standard（缺失时用配置表 legal 层兜底）
         const perCode = {};
-        for (const code of CODES) {
+        for (const code of codes) {
           const v = num((cell(row, `avg_value_${code}`) || {}).label);
           if (v == null) continue;
           const sPlatform = num((cell(row, `outlet_standard_${code}`) || {}).label);
           const f = (cell(row, `flag_${code}`) || {}).label || '';
-          const sLocal = stdFromTable(mp.name, code, isGas);
-          // override：本地表优先（A 级等更严口径）；fallback：仅平台缺失时兜底
-          let s = null;
-          let stdSource = '';
-          if (sLocal != null && (STD_MODE === 'override' || sPlatform == null)) { s = sLocal; stdSource = 'A级表'; }
-          else if (sPlatform != null) { s = sPlatform; stdSource = '平台'; }
-          if (s == null) {
+          const sA = tierStd(TIER_A, mp.name, code, isGas);
+          const sLegal = sPlatform != null ? sPlatform : tierStd(TIER_LEGAL, mp.name, code, isGas);
+          if (sA == null && sLegal == null) {
             // 工况参数（S0x/B0x）本身没有限值，不计入"缺标准"
             if (!/^[SB]\d{2}$/i.test(code)) missingStd.add(`${mp.name}/${code}`);
             continue;
           }
-          if (sLocal != null && sPlatform != null && Math.abs(sLocal - sPlatform) > 1e-9) {
-            stdDiff.add(`${mp.name}/${code}：平台 ${sPlatform} → A级 ${sLocal}`);
-          }
-          perCode[code] = { value: v, standard: s, flag: f, stdSource };
+          if (sA != null && sLegal != null && sA < sLegal) stdPairs.add(`${mp.name}/${code}：A级 ${sA} ＜ 排放 ${sLegal}`);
+          perCode[code] = { value: v, stdA: sA, stdLegal: sLegal, flag: f, stdLegalSource: sPlatform != null ? '平台' : '配置表' };
         }
         // ② 废气折算：view/list 的 avg_zs[hour]（数组下标 = 小时）；用实测值匹配到因子编码
         const zsByCode = {};
@@ -306,9 +337,9 @@ async function pushBark(title, body) {
             if (hit) zsByCode[hit[0]] = hz;
           }
         }
-        // ③ 判定：废气用折算（有则用）、废水用实测
+        // ③ 判定：废气用折算（有则用）、废水用实测；同时比对两层标准
         for (const [code, pc] of Object.entries(perCode)) {
-          const ev = judgePoint(pc.value, zsByCode[code], pc.standard, pc.flag, {
+          const ev = judgeTiers(pc.value, zsByCode[code], pc.stdA, pc.stdLegal, pc.flag, {
             requireValid: ALARM.requireValid,
             minRatio: ALARM.minRatio,
             useZs: isGas && ALARM.compare !== 'avg_value',
@@ -316,26 +347,31 @@ async function pushBark(title, body) {
           if (!ev) continue;
           checkedFactors++;
           if (verbose) {
-            log(`  [eval] ${hk.date} ${hk.hour}时 ${mp.name} ${code} 实测=${ev.value} 折算=${ev.zs == null ? '-' : ev.zs} 判定值=${Number(ev.judged.toFixed(3))} 标准=${ev.standard}(${pc.stdSource}) ratio=${ev.ratio.toFixed(3)} flag=${ev.flag} valid=${ev.valid} usedZs=${ev.usedZs}`);
+            log(`  [eval] ${hk.date} ${hk.hour}时 ${mp.name} ${code} 实测=${ev.value} 折算=${ev.zs == null ? '-' : ev.zs} 判定值=${Number(ev.judged.toFixed(3))} A级=${ev.stdA == null ? '-' : ev.stdA} 排放=${ev.stdLegal == null ? '-' : ev.stdLegal}(${pc.stdLegalSource}) rA=${ev.ratioA == null ? '-' : ev.ratioA.toFixed(3)} rL=${ev.ratioLegal == null ? '-' : ev.ratioLegal.toFixed(3)} flag=${ev.flag} valid=${ev.valid} usedZs=${ev.usedZs}`);
           }
           if (!ev.exceeded) continue;
           const key = `${hk.date} ${hk.hour}`;
           if (!hitByHour.has(key)) hitByHour.set(key, []);
-          hitByHour.get(key).push({ mp: mp.name, code, name: factorName(mp.id, code), ...ev, hourKey: key, isGas, stdSource: pc.stdSource });
+          hitByHour.get(key).push({
+            mp: mp.name, code, name: nameByCode[code] || factorName(mp.id, code),
+            ...ev, hourKey: key, isGas, stdLegalSource: pc.stdLegalSource,
+          });
         }
       }
     }
   }
 
   const all = [...hitByHour.entries()].flatMap(([hourKey, items]) => items.map((it) => ({ ...it, hourKey })));
-  log(`检索完成：数值因子 ${checkedFactors} 个，超标命中 ${all.length} 条`);
-  if (stdDiff.size) log(`标准表（${STD_MODE}）覆盖平台限值 ${stdDiff.size} 项：${[...stdDiff].join('；')}`);
+  const nLegal = all.filter((x) => x.exceedLegal).length;
+  const nA = all.filter((x) => x.exceedA && !x.exceedLegal).length;
+  log(`检索完成：数值因子 ${checkedFactors} 个，命中 ${all.length} 条（超排放标准 ${nLegal}，仅超A级 ${nA}）`);
+  if (stdPairs.size) log(`双层标准（A级更严）${stdPairs.size} 项：${[...stdPairs].join('；')}`);
   if (missingStd.size) log(`缺少标准值（无法判定）${missingStd.size} 项：${[...missingStd].slice(0, 20).join('、')}${missingStd.size > 20 ? ' …' : ''}（可在 config/standards.json 补充）`);
 
-  // 去重
+  // 去重（A级预警与排放超标分开记：先预警、后升级为超标时会再推一次）
   const fresh = [];
   for (const it of all) {
-    const key = `alarm:${it.hourKey.replace(' ', ':')}:${it.mp}:${it.code}`;
+    const key = `alarm:${it.hourKey.replace(' ', ':')}:${it.mp}:${it.code}:${it.tier}`;
     if (dryRun) { fresh.push({ ...it, dedupKey: key }); continue; }
     let seen = null;
     try { seen = await kvGet(key); } catch (e) { /* 读失败按未告警处理 */ }
@@ -346,26 +382,26 @@ async function pushBark(title, body) {
   if (!fresh.length) {
     log('=== 完成（无新增超标）===');
     if (!dryRun && CF.apiToken) {
-      try { await kvPut('last-hourly-alarm', JSON.stringify({ at: new Date().toISOString(), ok: true, checked: checkedFactors, exceeded: all.length, pushed: 0, stdMode: STD_MODE, stdOverrides: stdDiff.size, missingStd: missingStd.size, missingSample: [...missingStd].slice(0, 20) })); } catch (e) { /* ignore */ }
+      try { await kvPut('last-hourly-alarm', JSON.stringify({ at: new Date().toISOString(), ok: true, checked: checkedFactors, exceeded: all.length, exceededLegal: nLegal, exceededA: nA, pushed: 0, missingStd: missingStd.size, missingSample: [...missingStd].slice(0, 20) })); } catch (e) { /* ignore */ }
     }
     process.exit(0);
   }
 
-  // 组装文案
+  // 组装文案：说明「超出哪个标准」
   const maxItems = Number.isFinite(ALARM.maxItemsPerPush) ? ALARM.maxItemsPerPush : 10;
   const shown = fresh.slice(0, maxItems);
   const lines = shown.map((it) => {
-    const ratioPct = Math.round((it.ratio - 1) * 100);
     const val = Number(it.judged.toFixed(3));
     const head = it.usedZs ? '折算 ' : '';
     const extra = it.usedZs ? `（实测 ${Number(it.value.toFixed(3))}）` : '';
-    return `· ${it.hourKey.slice(5)}时 ${it.mp} ${it.name} ${head}${val}${extra}（${it.stdSource === 'A级表' ? 'A级标准' : '标准'} ${it.standard}，超 ${ratioPct}%）`;
+    return `· ${it.hourKey.slice(5)}时 ${it.mp} ${it.name} ${head}${val}${extra}（${describeTier(it)}）`;
   });
   if (fresh.length > shown.length) lines.push(`…另有 ${fresh.length - shown.length} 条未展示`);
   const body = lines.join('\n');
-  const title = `⚠️ 小时超标 ${fresh[0].hourKey.slice(0, 10)}`;
+  const anyLegal = fresh.some((it) => it.exceedLegal);
+  const title = `${anyLegal ? '⚠️ 小时超标' : '⚠️ A级预警'} ${fresh[0].hourKey.slice(0, 10)}`;
 
-  for (const it of shown) log(`EXCEED ${it.hourKey} ${it.mp} ${it.name}=${it.judged} 标准=${it.standard} ratio=${it.ratio.toFixed(2)} flag=${it.flag}`);
+  for (const it of shown) log(`EXCEED ${it.hourKey} ${it.mp} ${it.name}=${it.judged} A级=${it.stdA == null ? '-' : it.stdA} 排放=${it.stdLegal == null ? '-' : it.stdLegal} tier=${it.tier} flag=${it.flag}`);
 
   if (dryRun) {
     console.log(`\n[DRY-RUN] ${title}\n${body}\n`);
@@ -384,8 +420,8 @@ async function pushBark(title, body) {
     try {
       await kvPut('last-hourly-alarm', JSON.stringify({
         at: new Date().toISOString(), ok: r.ok, checked: checkedFactors,
-        exceeded: all.length, pushed: r.ok ? shown.length : 0, title,
-        stdMode: STD_MODE, stdOverrides: stdDiff.size,
+        exceeded: all.length, exceededLegal: nLegal, exceededA: nA,
+        pushed: r.ok ? shown.length : 0, title,
         missingStd: missingStd.size, missingSample: [...missingStd].slice(0, 20),
       }));
     } catch (e) { /* ignore */ }

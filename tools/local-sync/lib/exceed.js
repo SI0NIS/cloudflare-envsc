@@ -2,14 +2,15 @@
 //
 // 数据来源（企业端 online-monitor/data/list，dateType=1 小时行）：
 //   每个因子 code 对应一组字段：avg_value_<code> 实测值、outlet_standard_<code> 标准值、
-//   flag_<code> 数据有效性（数据有效/--）。实测字段无“折算值”字段（已实测确认）。
+//   flag_<code> 数据有效性（数据有效/--）。因子编码由 /monitoritem/pollutant/list 提供
+//   （2026-10-23 实测：非甲烷总烃=508、颗粒物=001、二氧化硫=002、氮氧化物=003、
+//    化学需氧量=011、氨氮=060）。
 //
 // 判定口径（config/project.json → hourlyAlarm）：
-//   compare = 'avg_value'    → 实测 vs 标准（默认，O2 低于基准时偏保守，宁可多报）
-//           = 'o2_corrected' → 折算 vs 标准（需 baseO2 + o2Code）
-//           = 'max'          → max(实测, 折算) vs 标准（需 baseO2 + o2Code）
+//   废气：用折算值（view/list 的 avg_zs，缺失时退回实测）；废水：用实测值（平台无折算）。
 //   minRatio：判定阈值倍数（1.0 = 严格大于标准）
 //   requireValid：仅当 flag 为“数据有效”才判（默认 true）
+//   两层标准：A 级绩效（更严）+ 排放标准（平台），见 judgeTiers/describeTier。
 
 const cell = (row, k) => (row && row[k] && row[k].item) ? row[k].item : null;
 
@@ -90,6 +91,57 @@ function judgePoint(value, zs, standard, flag, opt = {}) {
   };
 }
 
+// 双层标准判定（2026-10-23）：A级绩效标准 + 排放标准
+//   stdA     = 重污染天气绩效分级 A 级限值（更严，缺失则 null）
+//   stdLegal = 平台 outlet_standard（排放标准，缺失则 null）
+//   返回 exceedA / exceedLegal / tier('legal'|'a'|null)，供推送说明「超出哪个标准」。
+function judgeTiers(value, zs, stdA, stdLegal, flag, opt = {}) {
+  const v = num(value), z = num(zs), sa = num(stdA), sl = num(stdLegal);
+  if (v == null) return null;
+  if (sa == null && sl == null) return null;
+  const valid = opt.requireValid === false ? true : flag === '数据有效';
+  const useZs = opt.useZs === true && z != null;
+  const judged = useZs ? z : v;
+  const minRatio = Number.isFinite(opt.minRatio) ? opt.minRatio : 1;
+  const ratioA = sa != null ? judged / sa : null;
+  const ratioLegal = sl != null ? judged / sl : null;
+  const exceedA = valid && ratioA != null && ratioA > minRatio;
+  const exceedLegal = valid && ratioLegal != null && ratioLegal > minRatio;
+  const tier = exceedLegal ? 'legal' : (exceedA ? 'a' : null);
+  return {
+    value: v,
+    zs: z,
+    judged,
+    usedZs: useZs,
+    valid,
+    stdA: sa,
+    stdLegal: sl,
+    ratioA,
+    ratioLegal,
+    exceedA,
+    exceedLegal,
+    tier,
+    exceeded: !!(exceedA || exceedLegal),
+    flag: flag || '',
+  };
+}
+
+// 生成「超出哪个标准」的说明（供推送文案）
+//   两层均超 → 先写排放标准（法定超标），并注明 A 级亦超；
+//   仅超 A 级 → 写明「未超排放标准」，避免误读为法定超标。
+function describeTier(it) {
+  const pA = it.ratioA != null ? Math.round((it.ratioA - 1) * 100) : null;
+  const pL = it.ratioLegal != null ? Math.round((it.ratioLegal - 1) * 100) : null;
+  if (it.exceedLegal) {
+    let s = `超排放标准 ${it.stdLegal}，超 ${pL}%`;
+    if (it.stdA != null) s += `；A级标准 ${it.stdA} 亦超`;
+    return s;
+  }
+  let s = `超A级标准 ${it.stdA}，超 ${pA}%`;
+  s += it.stdLegal != null ? `；未超排放标准 ${it.stdLegal}` : '；平台未配置排放标准';
+  return s;
+}
+
 // 对一行（一小时）评估多个因子；返回超标项数组
 function evalRow(row, codes, opt = {}) {
   const out = [];
@@ -100,4 +152,4 @@ function evalRow(row, codes, opt = {}) {
   return out;
 }
 
-module.exports = { evalFactor, evalRow, judgePoint, o2Correct, num, rowLabel, cell };
+module.exports = { evalFactor, evalRow, judgePoint, judgeTiers, describeTier, o2Correct, num, rowLabel, cell };
