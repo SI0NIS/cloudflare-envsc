@@ -170,7 +170,7 @@ async function run(env) {
 }
 
 // ---------- 看门狗：今日标记是否按时落库（自检保留，告警已静音） ----------
-// 2026-10-22 起：云函数停用、改本机 14:58 同步 → 自检结果仍写 last-watchdog，但**不再推送告警**。
+// 2026-10-22 起：云函数停用、改本机 14:40 同步 → 自检结果仍写 last-watchdog，但**不再推送告警**。
 async function watchdog(env) {
   const kv = env.ENVSC_KV;
   if (!kv) return { watchdog: 'skip', why: 'ENVSC_KV 未绑定' };

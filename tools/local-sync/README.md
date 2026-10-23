@@ -1,6 +1,6 @@
 # local-sync —— 本机执行标记同步（云函数不可用时的兜底）
 
-云函数（腾讯云 SCF / 阿里云 FC）不可用或欠费时，由本机计划任务在**每天 14:58** 完成：
+云函数（腾讯云 SCF / 阿里云 FC）不可用或欠费时，由本机计划任务在**每天 14:40** 完成：
 「校验/续期企业端 cookie → 抓取 D-1 标记 → 写入 Cloudflare KV」，供 15:00 的日报推送使用。
 
 ## 组成
@@ -30,13 +30,13 @@ node tools/local-sync/run_scf_local.cjs 2026-10-20 2 --force    # 指定日期�
 node tools/local-sync/auto-login/auto-login.cjs                 # 仅刷新 cookie
 ```
 
-## Windows 计划任务（每天 14:58）
+## Windows 计划任务（每天 14:40）
 
 ```powershell
 $action  = New-ScheduledTaskAction -Execute "<node.exe 绝对路径>" `
            -Argument '"<仓库路径>\tools\local-sync\run_scf_local.cjs" --quick' `
            -WorkingDirectory "<仓库路径>"
-$trigger = New-ScheduledTaskTrigger -Daily -At "14:58"
+$trigger = New-ScheduledTaskTrigger -Daily -At "14:40"
 $set     = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 15) `
            -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
 Register-ScheduledTask -TaskName "ENVSC-SCF-Local-Sync" -Action $action -Trigger $trigger -Settings $set -Force
@@ -47,6 +47,6 @@ Register-ScheduledTask -TaskName "ENVSC-SCF-Local-Sync" -Action $action -Trigger
 - **幂等**：先读 KV `marks:<日期>.at`，若已是今天则跳过，避免与云端重复抓取；
 - **cookie 续期**：`auto-login` 只在 cookie 失效时触发（约 7~8 天一次），每次耗时约 40 秒；
 - **失败告警**：同步或续期失败会发 Bark（每天最多一条），不会静默；
-- 本机需开机；若 14:58 未开机，任务会在开机后补跑（可能晚于 15:00 推送）；
+- 本机需开机；若 14:40 未开机，任务会在开机后补跑（可能晚于 15:00 推送）；
 - 企业端改版可能导致自动登录失效：先跑 `auto-login/debug-login.cjs` 看页面结构，再调整选择器；
 - 账号密码只存在于 `local-config.json`（本机），不要提交到仓库。

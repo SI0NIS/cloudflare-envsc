@@ -48,7 +48,7 @@
                      ├──────────────────────────────────────────┤
                      │ ② 企业端在线监控平台（仅境内可达）          │
                      │    分钟级自动标记 + 人工填报标记            │
-                     │    ↳ 由本机每天 14:58 抓取 → 写 KV          │
+                     │    ↳ 由本机每天 14:40 抓取 → 写 KV          │
                      │    （cookie 失效时自动登录续期；            │
                      │      历史：阿里云 FC / 腾讯云 SCF，已停用）   │
                      │    ↳ 或经 HTTPS 中继 relay（可选）         │
@@ -145,12 +145,12 @@ npm --prefix auto-login install puppeteer-core   # 自动登录续期依赖
 node run_scf_local.cjs 2026-10-21 2 --force      # 手动试跑一次
 ```
 
-然后注册 Windows 计划任务（每天 **14:58** 正式同步，早于 15:00 推送；另加「登录时」触发用于开机补缺）：
+然后注册 Windows 计划任务（每天 **14:40** 正式同步，早于 15:00 推送；另加「登录时」触发用于开机补缺）：
 
 ```powershell
-# 任务1：每天 14:58 正式同步（--quick 按完备性判定，数据不全自动补抓）
+# 任务1：每天 14:40 正式同步（--quick 按完备性判定，数据不全自动补抓）
 $a = New-ScheduledTaskAction -Execute "node.exe" -Argument '"<repo>\tools\local-sync\run_scf_local.cjs" --quick' -WorkingDirectory "<repo>"
-$t1 = New-ScheduledTaskTrigger -Daily -At "14:58:00"
+$t1 = New-ScheduledTaskTrigger -Daily -At "14:40:00"
 Register-ScheduledTask -TaskName "ENVSC-SCF-Local-Sync" -Action $a -Trigger $t1 -Force
 # 任务2：登录时补缺口（--if-missing 只补缺，不覆盖正式档的结果）
 $a2 = New-ScheduledTaskAction -Execute "node.exe" -Argument '"<repo>\tools\local-sync\run_scf_local.cjs" --if-missing' -WorkingDirectory "<repo>"
@@ -222,7 +222,7 @@ npx wrangler tail                            # 观察定时执行的实时日志
 
 `wrangler.toml` 中的 cron 是 **UTC 时区**：`0 7-12 * * *` = **北京时间 15:00–20:00 整点**，共 6 次。
 
-- 平台数据通常 13:00 后陆续就绪（本机 14:58 先抓标记，且载荷带完备性检查——不全会自动补抓），15:00 起步留缓冲；
+- 平台数据通常 13:00 后陆续就绪（本机 14:40 先抓标记，且载荷带完备性检查——不全会自动补抓），15:00 起步留缓冲；
 - 6 个触发点 = 最多 6 次重试机会（`not_ready` / 失败自动顺延）；
 - 推送成功写 KV 去重键，当天不会重复打扰；全达标（仅标题）同样写去重。
 

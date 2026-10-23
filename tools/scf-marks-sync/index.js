@@ -734,7 +734,7 @@ exports.main_handler = async (event, context) => {
     } catch (e) {
       say(`SYNC_WARN ${date} sign/qy/list 失败：${e.message}（人工标记回退到数据行扫描）`);
     }
-    // 波次4：并发 2 路抓取（原串行 + sleep(800)/点，5 点约 40~60s → 并发后 ~20s，为 14:58 紧贴 15:00 留余量）
+    // 波次4：并发 2 路抓取（原串行 + sleep(800)/点，5 点约 40~60s → 并发后 ~20s，为 14:40→15:00 窗口留余量）
     const processMp = async (mp) => {
       const logs = [];
       const rm = rowMinutesOf(mp);

@@ -52,7 +52,7 @@ Push channels: **Bark as primary** (free iOS app over public HTTPS); **email as 
                      │ ② Enterprise monitoring platform         │
                      │    (reachable only from mainland China)   │
                      │    Minute-level auto marks + manual marks │
-                     │    ↳ Scraped daily 14:58 by a local PC    │
+                     │    ↳ Scraped daily 14:40 by a local PC    │
                      │      (auto-login cookie refresh; legacy:  │
                      │      Alibaba FC / Tencent SCF, retired)   │
                      │    ↳ or via HTTPS relay (optional)        │
@@ -150,14 +150,14 @@ npm --prefix auto-login install puppeteer-core   # auto-login dependency
 node run_scf_local.cjs 2026-10-21 2 --force      # manual test run
 ```
 
-Then register the Windows scheduled task (daily **14:58**, ahead of the 15:00 push; plus an at-logon trigger to fill gaps after boot):
+Then register the Windows scheduled task (daily **14:40**, ahead of the 15:00 push; plus an at-logon trigger to fill gaps after boot):
 
 ```powershell
-# Task 1: daily sync at 14:58 (--quick completeness check; incomplete data triggers a re-scrape)
+# Task 1: daily sync at 14:40 (--quick completeness check; incomplete data triggers a re-scrape)
 $a = New-ScheduledTaskAction -Execute "node.exe" -Argument '"<repo>\tools\local-sync\run_scf_local.cjs" --quick' -WorkingDirectory "<repo>"
-$t1 = New-ScheduledTaskTrigger -Daily -At "14:58:00"
+$t1 = New-ScheduledTaskTrigger -Daily -At "14:40:00"
 Register-ScheduledTask -TaskName "ENVSC-SCF-Local-Sync" -Action $a -Trigger $t1 -Force
-# Task 2: fill gaps at logon (--if-missing never overwrites the official 14:58 run)
+# Task 2: fill gaps at logon (--if-missing never overwrites the official 14:40 run)
 $a2 = New-ScheduledTaskAction -Execute "node.exe" -Argument '"<repo>\tools\local-sync\run_scf_local.cjs" --if-missing' -WorkingDirectory "<repo>"
 $t2 = New-ScheduledTaskTrigger -AtLogOn
 Register-ScheduledTask -TaskName "ENVSC-SCF-Local-Sync-Logon" -Action $a2 -Trigger $t2 -Force
@@ -227,7 +227,7 @@ Meaning of the returned `action`:
 
 The cron in `wrangler.toml` is in **UTC**: `0 7-12 * * *` = **15:00–20:00 CST on the hour**, 6 runs a day.
 
-- Platform data usually becomes ready after ~13:00 CST (the local sync scrapes marks at 14:58 first, with a completeness check in the payload — incomplete data triggers a re-scrape); starting at 15:00 leaves a buffer;
+- Platform data usually becomes ready after ~13:00 CST (the local sync scrapes marks at 14:40 first, with a completeness check in the payload — incomplete data triggers a re-scrape); starting at 15:00 leaves a buffer;
 - 6 trigger points = up to 6 retries (`not_ready` / failures defer automatically);
 - A successful push writes the KV dedup key, so you're disturbed at most once a day; title-only (all-compliant) days write it too.
 
