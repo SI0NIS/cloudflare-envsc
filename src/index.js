@@ -152,6 +152,22 @@ async function runInner(env) {
   };
 }
 
+// 公开平台故障告警：每天最多一条，避免整点重试刷屏；恢复后日报仍会自动补推
+async function alertPlatformFailure(env, r) {
+  if (!env.BARK_KEY) return { ok: false, error: 'BARK_KEY 未配置' };
+  const day = d1Str();
+  const key = `pubfail:${day}`;
+  try { if (env.ENVSC_KV && await env.ENVSC_KV.get(key)) return { ok: true, skipped: true }; } catch (e) { /* 读失败按未告警处理 */ }
+  const why = String(r.error || r.reason || '未知错误')
+    .replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 90);
+  const body = `${day} 日报未生成：公开平台接口异常（${why}）。\n分钟级标记已由本机 14:40 同步，平台恢复后 15–20 点会自动补推。`;
+  const p = await pushBark(env.BARK_KEY, '⚠️ 日报未生成（公开平台不可用）', body, 'timeSensitive');
+  if (p.ok && env.ENVSC_KV) {
+    try { await env.ENVSC_KV.put(key, new Date().toISOString(), 2 * 86400); } catch (e) { /* 幂等键失败不影响告警 */ }
+  }
+  return p;
+}
+
 // 包装：把最近一次运行结果写进 KV，便于在 workers.dev 不可达时用命令行核对
 async function run(env) {
   let r;
@@ -161,12 +177,17 @@ async function run(env) {
     // 关键：任何未捕获异常也要落到 KV，否则线上排查没有任何线索
     r = { ok: false, action: 'failed', phase: 'runInner', error: String((e && e.stack) || e) };
   }
+  // 失败必须可见：公开平台维护/反爬时，过去会静默整天没有日报（2026-10-24）
+  let alert = null;
+  if (!r.ok && r.action === 'failed') {
+    try { alert = await alertPlatformFailure(env, r); } catch (e) { alert = { ok: false, error: String(e && e.message || e) }; }
+  }
   try {
     if (env.ENVSC_KV) {
-      await env.ENVSC_KV.put('last-result', JSON.stringify({ at: new Date().toISOString(), ...r }));
+      await env.ENVSC_KV.put('last-result', JSON.stringify({ at: new Date().toISOString(), ...r, alert }));
     }
   } catch (e) { /* 记录失败不影响主流程 */ }
-  return r;
+  return { ...r, alert };
 }
 
 // ---------- 看门狗：今日标记是否按时落库（自检保留，告警已静音） ----------

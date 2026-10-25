@@ -36,3 +36,6 @@ jobs:
 
       - name: 看门狗逻辑
         run: node tools/watchdog-test.mjs
+
+      - name: 公开平台故障告警（失败可见 + 幂等）
+        run: node tools/pubfail-test.mjs

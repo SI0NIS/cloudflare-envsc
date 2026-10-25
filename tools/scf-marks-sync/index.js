@@ -54,6 +54,8 @@ const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const envOf = (e, k, d) => (e && e[k] != null && e[k] !== '') ? String(e[k]) : d;
 const ymd = (d) => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+// 当前会话 cookie（main_handler 赋值；供模块级函数在公开平台不可达时回退企业端因子名）
+let CURRENT_COOKIE = '';
 
 // ---------- 项目业务配置（config/project.json；单文件部署到云端时文件不存在 → 内置默认值兜底） ----------
 const PROJECT_DEFAULTS = {
@@ -285,7 +287,28 @@ async function fetchFactorNamesOfDay(mpId, day) {
 
 // 2026-10-19：平台 D-1 的因子列表约 13:06 才更新，而同步在 12:55 跑 → 目标日可能为空，
 // 导致推送缺因子名。因子编号→名称 与日期无关，故目标日为空时依次回退前一/二天。
-async function loadFactorNames(mpId, dateStr) {
+// 企业端因子清单：code→名称（公开平台被 WAF 拦截时的兜底；编码与标记行一致）
+async function fetchEnterpriseFactorNames(mpId, mpType) {
+  const qs = new URLSearchParams({
+    method: '/monitoritem/pollutant/list', mpId: String(mpId), mpType: String(mpType), _t: String(Date.now()),
+  });
+  const r = await fetch(`${ROUTER}?${qs}`, {
+    headers: {
+      Cookie: CURRENT_COOKIE, Accept: 'application/json, text/plain, */*',
+      'X-Requested-With': 'XMLHttpRequest', 'User-Agent': UA, Referer: REFERER,
+    },
+  });
+  const j = JSON.parse(await r.text());
+  if (String(j.code) !== '200') throw new Error(`pollutant/list code=${j.code}`);
+  const map = new Map();
+  for (const x of (j.data || [])) {
+    if (x && x.code && x.name) map.set(String(x.code), String(x.name));
+  }
+  return map;
+}
+
+// logger 默认 console.log：本函数是模块级，不能直接用 main_handler 内的 say（2026-10-24 事故）
+async function loadFactorNames(mpId, dateStr, logger = console.log, mpType = null) {
   const key = String(mpId);
   // 波次4：因子编号→名称与日期无关，同一实例内已取到非空结果就不再重复抓取（days=2 时省一半请求）。
   if (FACTOR_LOADED.get(key)) {
@@ -313,16 +336,28 @@ async function loadFactorNames(mpId, dateStr) {
       const prev = MP_FACTOR_NAMES.get(key); // 同一实例内先前取到的非空结果优先保留
       if (prev && prev.size) map = prev;
     }
+    // 公开平台被 WAF 拦截（412）时，改用企业端因子清单兜底（本机/云函数均可直连）
+    if (!map.size && mpType != null && CURRENT_COOKIE) {
+      try {
+        const em = await fetchEnterpriseFactorNames(mpId, mpType);
+        if (em.size) {
+          map = em;
+          logger(`FACTOR_FALLBACK ${mpId} 公开平台无数据，改用企业端因子名 ${em.size} 个`);
+        }
+      } catch (e) {
+        logger(`FACTOR_FALLBACK_WARN ${mpId} 企业端因子名也失败：${e.message}`);
+      }
+    }
     MP_FACTOR_NAMES.set(key, map);
     if (map.size) {
       FACTOR_LOADED.set(key, true);
       FACTOR_NAMES.clear();
       for (const [k, v] of map) FACTOR_NAMES.set(k, v);
     } else {
-      say(`FACTOR_WARN ${mpId} 连续 3 天均未取到因子名（标记将不带因子名）`);
+      logger(`FACTOR_WARN ${mpId} 连续 3 天均未取到因子名（标记将不带因子名）`);
     }
   } catch (e) {
-    say(`FACTOR_WARN 因子名获取失败：${e.message}（标记将不带因子名）`);
+    logger(`FACTOR_WARN 因子名获取失败：${e.message}（标记将不带因子名）`);
   }
   return map.size;
 }
@@ -556,6 +591,7 @@ function manualRgSegV2(w, mpId) { // rg 兜底：与 windowText 同款头部
 exports.main_handler = async (event, context) => {
   const ev = event || {};
   const cookie = envOf(ev, 'cookie', process.env.CNEMC_COOKIE || '');
+  CURRENT_COOKIE = cookie;
   const psid = envOf(ev, 'psid', process.env.CNEMC_PSID || PROJECT.psId);
   const industry = envOf(ev, 'industry', process.env.INDUSTRY_TYPE || '00');
   const days = Math.max(1, parseInt(envOf(ev, 'days', process.env.DAYS || '2'), 10) || 2);
@@ -722,7 +758,7 @@ exports.main_handler = async (event, context) => {
     const pointsV2 = {}; // marks v2 结构化载荷（与 byMp 同条件写入）
     // 监测因子编号 → 名称（公开平台；**必须带 date**，当天无数据时接口返回空 list）
     FACTOR_NAMES.clear();
-    for (const m of mps) { if (m.id) await loadFactorNames(m.id, date); }
+    for (const m of mps) { if (m.id) await loadFactorNames(m.id, date, say, m.mpType); }
     say(`[${date}] FACTOR_NAMES 载入 ${FACTOR_NAMES.size} 个污染物因子名`);
     // 人工标记首选来源：填报记录接口（分钟级精确起止，含废水点）
     let qyMap = new Map();
