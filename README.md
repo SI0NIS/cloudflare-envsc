@@ -74,8 +74,9 @@
 
 | 机制 | 说明 |
 |---|---|
-| **就绪门控** | 先调平台的 `begin-end-time` 接口确认 D-1 数据已发布；未发布返回 `not_ready`，顺延到下一整点重试 |
+| **双层就绪门控** | 先确认 `begin-end-time` 的最新日期 ≥ D-1，再确认该日明细至少有 1 个带传输率的监测点；任一条件未满足都返回 `not_ready`，顺延到下一整点重试 |
 | **KV 去重** | 推送成功才写去重键，当天 6 次触发只推一次；未推送/失败不写，下一整点自然重试 |
+| **欠推自动补推** | 公开平台维护/失败日期写入 KV `backfill:pending`；恢复后先推 D-1，再从旧到新补缺（单次默认最多 3 天），全部成功才清空 |
 | **标记多源融合** | 分钟级 KV 标记**按监测点覆盖**公开版小时级标记；来源会如实标注（`kv`/`public`/`kv+public`/`relay`），便于核对 |
 | **看门狗** | Worker 每天 13:05 后自检 KV 里是否有今天写入的标记；同步中断告警已于 2026-10-22 关闭（云函数停用、改本机同步），自检结果仍写入 `last-watchdog` 供排查 |
 
@@ -102,6 +103,7 @@ cloudflare-envsc/
 │   ├── kv-read.py          # 读取/检查 KV 内容
 │   ├── buildtext-test.mjs  # 推送文案回归测试（27 例）
 │   ├── merge-test.mjs      # 标记合并回归测试（28 例）
+│   ├── backfill-test.mjs   # 维护期欠推补推回归测试（19 例）
 │   ├── watchdog-test.mjs   # 看门狗回归测试
 │   └── dump-*.mjs          # 各数据接口裸抓诊断脚本
 ├── relay/                  # 企业端 HTTP → HTTPS 中继（fly.io/Render/Docker，带鉴权，可选）
@@ -112,7 +114,7 @@ cloudflare-envsc/
 
 ### 0. 前置要求
 
-- Node.js ≥ 18（含 npm）；
+- Node.js ≥ 24（含 npm）；
 - 一个 Cloudflare 账号（免费版即可）；
 - iOS 设备安装 [Bark](https://apps.apple.com/app/bark-customed-notifications/id1403753865)（推送通道）；
 - 可选：[Resend](https://resend.com) 账号（邮件兜底）；
@@ -194,6 +196,7 @@ npx wrangler tail                            # 观察定时执行的实时日志
 | `action` | 含义 | 要处理吗 |
 |---|---|---|
 | `pushed` | 已取数并推送成功 | 否 |
+| `backfilled` | D-1 已推过，本次补推了历史欠推日期 | 否，正常 |
 | `skipped` | 当天已推送过（KV 去重命中） | 否，正常 |
 | `not_ready` | 平台还没发布 D-1 数据 | 否，下一整点自动重试 |
 | `failed` | 取数或推送失败 | 是，`wrangler tail` 看原因 |
@@ -220,6 +223,8 @@ npx wrangler tail                            # 观察定时执行的实时日志
 
 **本机同步配置**（`tools/local-sync/local-config.json`，不入仓库）：`cnemc.account/password`（企业端账号，自动登录续期用）、`cnemc.cookie`（可选，初始会话）、`cloudflare.accountId/kvNamespaceId/apiToken`（KV 读写）、`bark.key`（失败告警）。
 
+**欠推补推配置**（`config/project.json` → `backfill`）：`enabled` 开关、`startDate` 首次扫描起点、`maxPerRun` 单次最多补几天（默认 3）。状态在 KV `backfill:pending`，全部补完自动变为 `[]`。
+
 ## 定时与去重
 
 `wrangler.toml` 中的 cron 是 **UTC 时区**：`0 7-12 * * *` = **北京时间 15:00–20:00 整点**，共 6 次。
@@ -227,6 +232,7 @@ npx wrangler tail                            # 观察定时执行的实时日志
 - 平台数据通常 13:00 后陆续就绪（本机 14:40 先抓标记，且载荷带完备性检查——不全会自动补抓），15:00 起步留缓冲；
 - 6 个触发点 = 最多 6 次重试机会（`not_ready` / 失败自动顺延）；
 - 推送成功写 KV 去重键，当天不会重复打扰；全达标（仅标题）同样写去重。
+- 维护/失败日期进入欠推队列；平台恢复后先推 D-1，再用单次剩余配额从旧到新补推，补完清空队列。
 
 ## 小时超标告警（2026-10-23 新增）
 
@@ -261,6 +267,7 @@ node tools/local-sync/hourly-alarm.cjs --date 2026-10-22 --hour 11 --dry-run --v
 npm run dev                        # 本地起 Worker（wrangler dev）
 node tools/buildtext-test.mjs      # 推送文案规则 27 例
 node tools/merge-test.mjs          # 标记合并规则 28 例
+node tools/backfill-test.mjs       # 欠推登记/双层就绪门控/恢复补推/限流/去重 19 例
 node tools/watchdog-test.mjs       # 看门狗逻辑
 ```
 

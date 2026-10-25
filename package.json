@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "private": true,
   "description": "有效传输率每日核查 · Cloudflare Worker 版（KV 去重 + Bark/邮件推送）",
+  "engines": {
+    "node": ">=24"
+  },
   "scripts": {
     "deploy": "wrangler deploy",
     "dev": "wrangler dev",

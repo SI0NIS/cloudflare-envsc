@@ -42,7 +42,7 @@
 ┌─────────────────────────────┐        ┌──────────────────────┐
 │ Cloudflare Worker `envsc`   │◀──────▶│ 公开平台 jkzx.envsc.cn │
 │  cron 0 7-12 * * * (UTC)    │  取有效  │ 有效传输率/小时级标记  │
-│  = 北京 15:00–20:00 整点     │  传输率  │ （当前维护中，见 10.1）│
+│  = 北京 15:00–20:00 整点     │  传输率  │ （数据未发布，见 10.1）│
 └──────────────┬──────────────┘        └──────────────────────┘
                │ Bark（主）/ 邮件（兜底，未配 key）
                ▼
@@ -68,9 +68,9 @@
 | 企业端 | `http://116.178.28.170:3080/amOnline/zdjk-company-base/` |
 | 企业 psId | `654000000031` |
 | 监测点 | 总排口、生产工艺尾气排放口、环保尾气排放口、3号机组、1号2号机组 |
-| 本机 Node | `D:\Application\NodeJs\node.exe`（Node 22） |
+| 本机 Node | `D:\Application\NodeJs\node.exe`（Node 24，v24.20.0） |
 | 本机 Chrome | `C:\Program Files\Google\Chrome\Application\chrome.exe` |
-| 当前 Worker 版本 | `304bc04c`（2026-10-25） |
+| 当前 Worker 版本 | `45253d58`（2026-10-25，含维护期欠推自动补推、双层就绪门控与 `not_ready` 保留队列修复） |
 | 文档基线（代码） | 本地 `ab807e2`；远端 `86c7415a`（树一致）。后续提交以 `git log` 为准 |
 
 ---
@@ -79,7 +79,7 @@
 
 ### 4.1 准备
 
-1. 安装 **Node.js 22**、**Google Chrome**（自动登录依赖）；
+1. 安装 **Node.js 24**、**Google Chrome**（自动登录依赖）；
 2. 克隆仓库：
 
 ```bash
@@ -232,6 +232,7 @@ cloudflare-envsc/
 | `thresholds` | 标记保留阈值：`autoMarkMinMinutes`（连续 ≥15min）、`autoMarkMinPerHour`（单小时累计 ≥15min） |
 | `pushWindow` | 推送窗口（北京 15–21 点） |
 | `hourlyAlarm` | 小时告警：`enabled`、`compare`、`minRatio`、`requireValid`、`maxItemsPerPush` |
+| `backfill` | 维护期欠推日报：`enabled`、`startDate`（首次扫描起点）、`maxPerRun`（单次最多补几天，默认 3） |
 
 ### 6.2 `config/standards.json`（两层标准）
 
@@ -284,8 +285,11 @@ cloudflare-envsc/
 ### 7.2 日报推送（Worker，15:00–20:00 整点）
 
 - 目标日 = 北京时间 D-1；
+- **双层就绪门控**：`begin-end-time.endTime >= 目标日`，且目标日 `transMpInfoList` 至少有一个监测点带传输率；任一不满足都返回 `not_ready`，不推送 0% 占位日报；
 - 去重键 `2026-10-24` 形式的 KV key：推送成功才写；
 - 若上次是「降级推送」（`marksSource=public`）且未升级，拿到分钟级标记后允许**再推一次完整版**（`upgraded:true`）；
+- **欠推自动补推**：维护/412 导致某天失败时，将该日期写入 KV `backfill:pending`；平台恢复后每次整点先推 D-1，再用剩余配额从旧到新补推，单次最多 `backfill.maxPerRun` 天（默认 3），直到队列清空；
+- 补推同样受日报去重键保护：已有成功记录不会重复推送；补推失败或未就绪的日期继续留在队列，下一整点重试；
 - 数据源：
   - 公开平台 `psinfo/detail`（有效传输率）+ `psinfo/pollutant/list`（小时级标记，兜底）；
   - KV `marks:v2:<date>` / `marks:<date>`（按 `at` 取新，v2 优先）；
@@ -318,6 +322,7 @@ cloudflare-envsc/
 | `last-hourly-alarm` | 最近一次小时告警结果 |
 | `local-task:status` | 本机同步最近状态 |
 | `cookieAlert:<date>` | cookie 失效告警幂等 |
+| `backfill:pending` | 维护期欠推日期（JSON 数组，按日期升序；全部成功后为 `[]`） |
 | `wd:<date>` | 看门狗历史幂等（告警已静音） |
 
 ---
@@ -388,18 +393,20 @@ cloudflare-envsc/
 
 ## 10. 当前已知问题与待办（2026-10-25）
 
-### 10.1 公开平台维护中（阻塞日报）
+### 10.1 公开平台部分恢复，维护期数据尚未发布（阻塞日报）
 
-- 现象：`https://jkzx.envsc.cn/transpublic-v2/*` 全部 302 → `https://www.envsc.cn/ErrPage/24yearcslError.html`，再 412；页面 title「维护公告」；`transpublic-v3/*` 全部 502；
-- 影响：Worker 无法获取有效传输率 → 10-24 全天日报未生成；10-23 的日报也未成功推送（去重键不存在）；
-- 已处理：Worker 失败时**每天告警一次**（`pubfail:<date>`），不再静默；
-- 待办：平台恢复后补推 10-23（`node tools/push-now.mjs 2026-10-23`，需 `CF_ACC/CF_NS/CF_TOK` + `BARK_KEY`）。
+- 2026-10-25 13:48 实测：`/region/begin-end-time` 已恢复 HTTP 200，但 `endTime` 仍为 **2026-10-22**；
+- 10-23、10-24 的 `/psinfo/psinfo/detail` 虽返回 HTTP 200、`code=200`，但 `realtime=0`、`comple=0`、`transMpInfoList=[]`，属于**占位空数据**，不能据此生成 0% 日报；
+- 维护公告 `https://www.envsc.cn/ErrPage/24yearcslError.html` 仍返回 HTTP 412；
+- 影响：10-23、10-24 日报尚未推送（两天的日报去重键均不存在）；两天的分钟级标记已完整同步；
+- 已处理：Worker 每天告警一次（`pubfail:<date>`），两天已持久化在 `backfill:pending`；数据未就绪时返回 `not_ready` 并**保留队列，不清空、不写日报去重键**；
+- 恢复判定：目标日必须同时满足 `endTime >= 目标日` 且 `transMpInfoList` 有监测点数据；满足后 Worker 在 15:00–20:00 各整点自动从旧到新补推，单次最多 3 天，全部成功才清空队列。
 
 ### 10.2 其他
 
 | 项 | 状态 |
 |---|---|
-| 10-24 标记 | 已预抓，`total=0`（当天无标记）；今日 15:00 若平台恢复会自动推 10-24 |
+| 10-24 标记 | 已预抓且完整（`total=0`，当天无标记）；平台数据发布后自动补推，待补 10-23、10-24 |
 | v1 文本键兼容期 | 计划 2026-11-21 左右停写，仅保留 v2；Worker 已支持双键回退 |
 | 腾讯云 SCF | 已欠费停用，两个触发器均停用；不要再依赖 |
 | 邮件兜底 | 代码就位，缺 `RESEND_API_KEY`（未启用） |
@@ -439,7 +446,7 @@ node tools\local-sync\hourly-alarm.cjs --date 2026-10-25 --hour 10 --dry-run --v
 # 补推某天日报（需 CF_ACC/CF_NS/CF_TOK + BARK_KEY）
 node tools\push-now.mjs 2026-10-24
 # 全量测试
-for %f in (buildtext marksv2 merge windows hourly-alarm watchdog pubfail) do node tools\%f-test.mjs
+for %f in (buildtext marksv2 merge windows hourly-alarm watchdog pubfail backfill) do node tools\%f-test.mjs
 ```
 
 ### 11.3 故障排查表
@@ -450,7 +457,7 @@ for %f in (buildtext marksv2 merge windows hourly-alarm watchdog pubfail) do nod
 | `cookie 无效且自动登录失败` | cookie 过期 + 登录页慢/滑块失败 | 手动跑 `auto-login.cjs`；仍失败则手动写 cookie |
 | 同步成功但标记无因子名 | 公开平台因子名接口被拦 | 已自动回退企业端 `/monitoritem/pollutant/list`；看日志 `FACTOR_FALLBACK` |
 | 废水全是 `--` | 用了 `mpType=4` | 改 `mpType=1`（`queryMpType` 已处理） |
-| 日报未生成 | 公开平台维护/412 | 看 `last-result`；Worker 会每天告警一次；平台恢复后自动补推 |
+| 日报未生成/补推积压 | 公开平台维护/412 | 看 `last-result.backfill.pendingDates`；Worker 每天告警一次，恢复后 15–20 点自动补推 |
 | Worker 部署中断 | wrangler 反斜杠 config | 用正斜杠 `--config "D:/.../wrangler.toml"` |
 | GitHub 推送 403 | Token 缺 Contents 或 Workflows 权限 | 补权限；`.github/workflows/*` 需 Workflows: Read and write |
 | 计划任务没跑 | 电脑关机/休眠 | 任务设为 `StartWhenAvailable`，开机补跑（可能晚于 15:00） |
@@ -465,7 +472,8 @@ for %f in (buildtext marksv2 merge windows hourly-alarm watchdog pubfail) do nod
 - [ ] `hourly-alarm.cjs --dry-run --verbose` 能列出 5 个点的数值因子，`missingStd=0`
 - [ ] 三个计划任务状态 `Ready`，NextRun 分别为 14:40 / 登录时 / 每小时 :20
 - [ ] Bark 测试消息能收到（`curl -X POST https://api.day.app/<key> -H "Content-Type: application/json" -d '{"title":"test","body":"ok"}'`）
-- [ ] 全量测试 **125/125 PASS**
+- [ ] 全量测试 **144/144 PASS**
+- [ ] `last-result.backfill.pendingDates` 与 KV 实际缺失日期一致，恢复后自动清空
 - [ ] Worker 定时为 `0 7-12 * * *`，`last-result` 可读
 - [ ] 仓库 `main` 与本地树一致（或已知差异）
 
@@ -475,6 +483,7 @@ for %f in (buildtext marksv2 merge windows hourly-alarm watchdog pubfail) do nod
 
 | 提交 | 内容 |
 |---|---|
+| 本地未提交（2026-10-25） | 维护期欠推自动补推；双层就绪门控；`not_ready` 保留队列；Node 24（本机/CI/`engines`）；新增 19 项补推回归 |
 | `ab807e2` | 修复 10-24 `say` 崩溃；企业端因子名兜底；Worker 失败每天告警；新增 pubfail 测试 |
 | `673ee46` | 废水因子接入（mpType=1）；pH 区间判定；火电 SO₂ 35/NOx 50；总排口 COD 50/氨氮 5 |
 | `80b03bb` | 平台排放标准核实并写入 legal 兜底层 |

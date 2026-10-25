@@ -78,17 +78,27 @@ async function fetchRate(psId, day) {
     exemptionsReason: o.exemptionsReason || null,
   } : null;
 
+  const monitorPoints = (data.transMpInfoList || []).map((mp) => ({
+    mpName: mp.mpName || null,
+    realtime: packRow(mp.realtime),
+    comple: packRow(mp.comple),
+  }));
+  const hasRate = monitorPoints.some((mp) => [mp.realtime, mp.comple].some((row) =>
+    row && [row.effeTransRate, row.effeRate, row.transRate].some((v) => v != null)));
+  if (!monitorPoints.length || !hasRate) {
+    const err = new Error(`数据未就绪：平台最新 ${gate.endTime || '未知'}，但 ${day} 明细尚无监测点传输率`);
+    err.code = 'NOT_READY';
+    err.gate = gate;
+    throw err;
+  }
+
   return {
     date: day,
     psName: data.psName || COMPANY_NAME,
     regionName: data.regionName || null,
     realtime: packRow(data.realtime),
     comple: packRow(data.comple),
-    monitorPoints: (data.transMpInfoList || []).map((mp) => ({
-      mpName: mp.mpName || null,
-      realtime: packRow(mp.realtime),
-      comple: packRow(mp.comple),
-    })),
+    monitorPoints,
     gate,
   };
 }

@@ -11,6 +11,7 @@ const PROJECT_DEFAULTS = {
   ],
   thresholds: { autoMarkMinMinutes: 15, autoMarkMinPerHour: 15 },
   pushWindow: { startHour: 15, endHour: 21 },
+  backfill: { enabled: true, startDate: '2026-10-23', maxPerRun: 3 },
 };
 
 const PROJECT = { ...PROJECT_DEFAULTS, ...(PROJECT_JSON || {}) };
@@ -32,6 +33,14 @@ function validateProjectConfig() {
   const w = PROJECT.pushWindow || {};
   if (!Number.isInteger(w.startHour) || !Number.isInteger(w.endHour) || w.startHour >= w.endHour) {
     problems.push(`pushWindow 非法: ${JSON.stringify(w)}`);
+  }
+  const b = PROJECT.backfill || {};
+  if (typeof b.enabled !== 'boolean') problems.push(`backfill.enabled 非法: ${b.enabled}`);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(b.startDate || '')) || Number.isNaN(Date.parse(`${b.startDate}T00:00:00Z`))) {
+    problems.push(`backfill.startDate 非法: ${b.startDate}`);
+  }
+  if (!Number.isInteger(b.maxPerRun) || b.maxPerRun < 1 || b.maxPerRun > 10) {
+    problems.push(`backfill.maxPerRun 非法: ${b.maxPerRun}`);
   }
   if (problems.length) throw new Error(`project.json 配置非法：\n- ${problems.join('\n- ')}`);
 }

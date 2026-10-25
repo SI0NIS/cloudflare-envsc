@@ -78,8 +78,9 @@ Core mechanisms:
 
 | Mechanism | Description |
 |---|---|
-| **Readiness gate** | Queries the platform's `begin-end-time` API first to confirm D-1 data is published; otherwise returns `not_ready` and defers to the next hourly run |
+| **Two-stage readiness gate** | Confirms the latest `begin-end-time` date covers D-1, then requires at least one monitoring point with a transmission rate in the daily detail; otherwise returns `not_ready` and defers to the next hourly run |
 | **KV dedup** | Writes the dedup key only after a successful push, so the 6 daily runs result in exactly one push; failures don't write the key, so the next hour naturally retries |
+| **Automatic backfill** | Failed/maintenance days are persisted in KV `backfill:pending`; after recovery the Worker pushes D-1 first, then backfills oldest-first (3 days per run by default) until the queue is empty |
 | **Multi-source mark merging** | Minute-level KV marks **override** hour-level public marks per monitoring point; the source is truthfully recorded (`kv`/`public`/`kv+public`/`relay`) for easy auditing |
 | **Watchdog** | After 13:05 CST the Worker self-checks whether today's marks landed in KV; the sync-interruption alert was turned off on 2026-10-22 (cloud functions retired in favor of local sync) — self-check results are still written to `last-watchdog` for troubleshooting |
 
@@ -106,6 +107,7 @@ cloudflare-envsc/
 │   ├── kv-read.py          # Read/inspect KV contents
 │   ├── buildtext-test.mjs  # Message-format regression tests (27 cases)
 │   ├── merge-test.mjs      # Mark-merging regression tests (28 cases)
+│   ├── backfill-test.mjs   # Missing-report backfill tests (19 cases)
 │   ├── watchdog-test.mjs   # Watchdog regression tests
 │   └── dump-*.mjs          # Raw-API diagnostic scripts for each data source
 ├── relay/                  # Enterprise HTTP → HTTPS relay (fly.io/Render/Docker, authenticated, optional)
@@ -116,7 +118,7 @@ cloudflare-envsc/
 
 ### 0. Prerequisites
 
-- Node.js ≥ 18 (with npm);
+- Node.js ≥ 24 (with npm);
 - A Cloudflare account (free tier is enough);
 - [Bark](https://apps.apple.com/app/bark-customed-notifications/id1403753865) installed on an iOS device (push channel);
 - Optional: a [Resend](https://resend.com) account (email fallback);
@@ -199,6 +201,7 @@ Meaning of the returned `action`:
 | `action` | Meaning | Action needed? |
 |---|---|---|
 | `pushed` | Fetched and pushed successfully | No |
+| `backfilled` | D-1 was already pushed; historical missing days were backfilled | No, normal |
 | `skipped` | Already pushed today (KV dedup hit) | No, normal |
 | `not_ready` | Platform hasn't published D-1 data yet | No, auto-retries next hour |
 | `failed` | Fetch or push failed | Yes — check `wrangler tail` |
@@ -225,6 +228,8 @@ Meaning of the returned `action`:
 
 **Local sync config** (`tools/local-sync/local-config.json`, not in the repo): `cnemc.account/password` (enterprise credentials for auto-login refresh), `cnemc.cookie` (optional initial session), `cloudflare.accountId/kvNamespaceId/apiToken` (KV read/write), `bark.key` (failure alerts).
 
+**Backfill config** (`config/project.json` → `backfill`): `enabled`, `startDate` for the first scan, and `maxPerRun` (default 3). Pending dates live in KV `backfill:pending` and become `[]` when fully caught up.
+
 ## Schedule & Dedup
 
 The cron in `wrangler.toml` is in **UTC**: `0 7-12 * * *` = **15:00–20:00 CST on the hour**, 6 runs a day.
@@ -232,6 +237,7 @@ The cron in `wrangler.toml` is in **UTC**: `0 7-12 * * *` = **15:00–20:00 CST 
 - Platform data usually becomes ready after ~13:00 CST (the local sync scrapes marks at 14:40 first, with a completeness check in the payload — incomplete data triggers a re-scrape); starting at 15:00 leaves a buffer;
 - 6 trigger points = up to 6 retries (`not_ready` / failures defer automatically);
 - A successful push writes the KV dedup key, so you're disturbed at most once a day; title-only (all-compliant) days write it too.
+- Failed/maintenance days enter the pending queue; after recovery D-1 is pushed first, then missing days are backfilled oldest-first within the per-run budget.
 
 ## Hourly Exceedance Alerts (added 2026-10-23)
 
@@ -266,6 +272,7 @@ node tools/local-sync/hourly-alarm.cjs --date 2026-10-22 --hour 11 --dry-run --v
 npm run dev                        # run the Worker locally (wrangler dev)
 node tools/buildtext-test.mjs      # message-format rules, 27 cases
 node tools/merge-test.mjs          # mark-merging rules, 28 cases
+node tools/backfill-test.mjs       # queue, two-stage readiness gate, recovery, rate limit, dedup, 19 cases
 node tools/watchdog-test.mjs       # watchdog logic
 ```
 

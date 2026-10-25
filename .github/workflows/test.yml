@@ -11,7 +11,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
 
       - name: 语法检查
         run: |
@@ -39,3 +39,6 @@ jobs:
 
       - name: 公开平台故障告警（失败可见 + 幂等）
         run: node tools/pubfail-test.mjs
+
+      - name: 维护期欠推日报自动补推
+        run: node tools/backfill-test.mjs

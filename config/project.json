@@ -18,5 +18,10 @@
     "requireValid": true,
     "maxItemsPerPush": 10
   },
-  "pushWindow": { "startHour": 15, "endHour": 21 }
+  "pushWindow": { "startHour": 15, "endHour": 21 },
+  "backfill": {
+    "enabled": true,
+    "startDate": "2026-10-23",
+    "maxPerRun": 3
+  }
 }

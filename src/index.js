@@ -23,7 +23,7 @@
  *   BARK_KEY / RESEND_API_KEY / MAIL_FROM / MAIL_TO
  */
 import { PROJECT, validateProjectConfig } from './config.js';
-import { TZ_OFFSET, ymd, d1Str } from './core/time.js';
+import { TZ_OFFSET, ymd, d1Str, isDay, datesBetween } from './core/time.js';
 import { v2SegsText } from './core/marks.js';
 import { judge } from './core/judge.js';
 import { buildText } from './core/text.js';
@@ -33,9 +33,8 @@ import { fetchMarksFromKV } from './io/kv.js';
 import { pushBark, pushEmail } from './io/push.js';
 
 // ---------- 主流程 ----------
-async function runInner(env) {
+async function runForDay(env, day) {
   validateProjectConfig(); // 配置非法 → 抛错（run() 兜底落 last-result，不静默跑错）
-  const day = d1Str();
   const psId = env.CNEMC_PSID || PROJECT.psId;
 
   // 去重（KV）
@@ -152,16 +151,168 @@ async function runInner(env) {
   };
 }
 
+// ---------- 维护期欠推日报：KV 持久化 + 恢复后按旧→新限流补推 ----------
+const BACKFILL_KEY = 'backfill:pending';
+
+function parsePending(raw) {
+  const parsed = JSON.parse(raw);
+  const arr = Array.isArray(parsed) ? parsed : (parsed && Array.isArray(parsed.dates) ? parsed.dates : null);
+  if (!arr) throw new Error('backfill:pending 格式非法');
+  return [...new Set(arr.filter(isDay))].sort();
+}
+
+// 首次没有 pending 键时，从 startDate 扫到 D-1，以补上上线前已经缺的日期；
+// 之后完全依赖持久化列表 + 每日失败登记，不再重复全量扫描。
+async function loadBackfillState(env, day) {
+  const cfg = PROJECT.backfill || {};
+  if (!cfg.enabled) return { enabled: false, pending: [], seeded: false, error: null };
+  if (!env.ENVSC_KV) return { enabled: true, pending: [], seeded: false, error: 'ENVSC_KV 未绑定' };
+
+  let raw = null;
+  let pending = null;
+  let seeded = false;
+  try {
+    raw = await env.ENVSC_KV.get(BACKFILL_KEY);
+  } catch (e) {
+    return { enabled: true, pending: [], seeded: false, error: `读取欠推列表失败: ${e.message}` };
+  }
+  if (raw) {
+    try { pending = parsePending(raw); } catch (e) { pending = null; }
+  }
+  if (pending === null) {
+    seeded = true;
+    pending = [];
+    for (const d of datesBetween(cfg.startDate, day)) {
+      let done = null;
+      try { done = await env.ENVSC_KV.get(d); }
+      catch (e) { return { enabled: true, pending: [], seeded, error: `扫描欠推日期失败(${d}): ${e.message}` }; }
+      if (!done) pending.push(d);
+    }
+  }
+
+  let dayDone = null;
+  try { dayDone = await env.ENVSC_KV.get(day); }
+  catch (e) { return { enabled: true, pending: pending.filter((d) => d !== day).sort(), seeded, error: `读取 D-1 去重键失败: ${e.message}` }; }
+  if (dayDone) pending = pending.filter((d) => d !== day);
+  else if (!pending.includes(day)) pending.push(day);
+
+  pending = pending.filter((d) => isDay(d) && d <= day).sort();
+  return { enabled: true, pending, seeded, error: null };
+}
+
+async function saveBackfillState(env, pending) {
+  if (!env.ENVSC_KV) return 'ENVSC_KV 未绑定';
+  try { await env.ENVSC_KV.put(BACKFILL_KEY, JSON.stringify(pending)); return null; }
+  catch (e) { return `写入欠推列表失败: ${e.message}`; }
+}
+
+function shortResult(r) {
+  return {
+    date: r.date || null,
+    ok: !!r.ok,
+    action: r.action || null,
+    reason: r.reason || r.error || null,
+  };
+}
+
+// 每次运行：先处理 D-1（保留原有升级逻辑），再用剩余配额从旧到新补缺。
+// maxPerRun 统计真正发起取数/推送的日期，单纯命中去重键不计入。
+async function runCycle(env, opts = {}) {
+  validateProjectConfig();
+  const day = opts.day || d1Str();
+  if (!isDay(day)) throw new Error(`目标日期非法: ${day}`);
+  const cfg = PROJECT.backfill || {};
+  const state = await loadBackfillState(env, day);
+  const pendingSet = new Set(state.pending);
+  const pendingBefore = [...state.pending];
+  const queue = [day];
+  if (state.enabled) for (const d of state.pending) if (d < day) queue.push(d);
+
+  const results = [];
+  const attemptedDates = [];
+  const pushedDates = [];
+  let primary = null;
+  let failure = null;
+
+  for (const d of queue) {
+    if (d !== day && state.enabled && attemptedDates.length >= cfg.maxPerRun) break;
+
+    // 旧日期先查去重；已有键直接清出欠推列表，不占当次配额。
+    if (d !== day) {
+      let done = null;
+      try { done = await env.ENVSC_KV.get(d); }
+      catch (e) {
+        failure = { ok: false, action: 'failed', date: d, reason: `KV 去重检查失败: ${e.message}` };
+        break;
+      }
+      if (done) { pendingSet.delete(d); continue; }
+    }
+
+    let r;
+    try { r = await runForDay(env, d); }
+    catch (e) { r = { ok: false, action: 'failed', date: d, reason: String((e && (e.stack || e.message)) || e) }; }
+    results.push(r);
+    if (d === day) primary = r;
+    if (r.action !== 'skipped') attemptedDates.push(d);
+
+    if (r.action === 'not_ready') {
+      // not_ready 也带 ok:true（平台没有故障），但绝不能因此清掉欠推队列。
+      pendingSet.add(d);
+      if (d !== day) break; // 旧日期也未就绪，下一整点再试，避免空耗配额
+    } else if (r.ok) {
+      pendingSet.delete(d);
+      if (r.action === 'pushed') pushedDates.push(d);
+    } else {
+      pendingSet.add(d);
+      failure = r;
+      break;
+    }
+  }
+
+  const pendingAfter = [...pendingSet].filter((d) => isDay(d) && d <= day).sort();
+  const persistError = state.enabled ? await saveBackfillState(env, pendingAfter) : null;
+  const backfill = {
+    enabled: !!state.enabled,
+    key: BACKFILL_KEY,
+    startDate: cfg.startDate || null,
+    maxPerRun: cfg.maxPerRun || null,
+    seeded: !!state.seeded,
+    pendingBefore: pendingBefore.length,
+    pendingAfter: pendingAfter.length,
+    pendingDates: pendingAfter,
+    attemptedDates,
+    pushedDates,
+    results: results.map(shortResult),
+    error: state.error || persistError || null,
+  };
+
+  const base = primary || { ok: true, action: 'skipped', date: day, reason: '未执行日期任务' };
+  if (failure) {
+    return {
+      ...base,
+      ok: false,
+      action: 'failed',
+      failedDate: failure.date || day,
+      reason: failure.reason || failure.error || '补推失败',
+      backfill,
+    };
+  }
+  if (base.action === 'skipped' && pushedDates.length) return { ...base, action: 'backfilled', backfill };
+  return { ...base, backfill };
+}
+
 // 公开平台故障告警：每天最多一条，避免整点重试刷屏；恢复后日报仍会自动补推
 async function alertPlatformFailure(env, r) {
   if (!env.BARK_KEY) return { ok: false, error: 'BARK_KEY 未配置' };
-  const day = d1Str();
+  const day = r.failedDate || r.date || d1Str();
   const key = `pubfail:${day}`;
   try { if (env.ENVSC_KV && await env.ENVSC_KV.get(key)) return { ok: true, skipped: true }; } catch (e) { /* 读失败按未告警处理 */ }
   const why = String(r.error || r.reason || '未知错误')
     .replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 90);
-  const body = `${day} 日报未生成：公开平台接口异常（${why}）。\n分钟级标记已由本机 14:40 同步，平台恢复后 15–20 点会自动补推。`;
-  const p = await pushBark(env.BARK_KEY, '⚠️ 日报未生成（公开平台不可用）', body, 'timeSensitive');
+  const pending = Number(r.backfill && r.backfill.pendingAfter) || 0;
+  const body = `${day} 日报暂未生成：公开平台接口异常（${why}）。\n已记录 ${pending} 个欠推日期；平台恢复后 15–20 点会按日期从旧到新自动补推。`;
+  const title = day === d1Str() ? '⚠️ 日报未生成（公开平台不可用）' : '⚠️ 日报补推未完成（公开平台不可用）';
+  const p = await pushBark(env.BARK_KEY, title, body, 'timeSensitive');
   if (p.ok && env.ENVSC_KV) {
     try { await env.ENVSC_KV.put(key, new Date().toISOString(), 2 * 86400); } catch (e) { /* 幂等键失败不影响告警 */ }
   }
@@ -172,10 +323,10 @@ async function alertPlatformFailure(env, r) {
 async function run(env) {
   let r;
   try {
-    r = await runInner(env);
+    r = await runCycle(env);
   } catch (e) {
     // 关键：任何未捕获异常也要落到 KV，否则线上排查没有任何线索
-    r = { ok: false, action: 'failed', phase: 'runInner', error: String((e && e.stack) || e) };
+    r = { ok: false, action: 'failed', phase: 'runCycle', error: String((e && e.stack) || e) };
   }
   // 失败必须可见：公开平台维护/反爬时，过去会静默整天没有日报（2026-10-24）
   let alert = null;
@@ -234,7 +385,7 @@ export function inPushWindow(bjHour) {
   return bjHour >= PROJECT.pushWindow.startHour && bjHour < PROJECT.pushWindow.endHour;
 }
 
-export { buildText, markText, fetchMarks, watchdog, v2SegsText };
+export { buildText, markText, fetchMarks, watchdog, v2SegsText, runCycle };
 
 export default {
   // 定时触发（Cron Triggers）
