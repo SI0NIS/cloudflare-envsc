@@ -6,6 +6,8 @@ The **effective transmission rate** of enterprise pollution-source automatic mon
 
 This project fully automates that routine: **it checks the transmission rate on schedule every day, and the moment any abnormal monitoring point or anomaly mark shows up, it pushes straight to your phone (Bark / email)** — no need to log in to any platform; the notification alone tells you which stack/outlet had an issue, what kind, and at exactly what time.
 
+> Handing over or moving to a new machine? Read **[docs/HANDOVER.md](docs/HANDOVER.md)** first (architecture, setup, config, operations, troubleshooting, acceptance checklist).
+
 ## Push Examples
 
 **① All compliant (100% — title only, no noise):**
