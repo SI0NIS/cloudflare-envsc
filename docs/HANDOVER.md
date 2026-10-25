@@ -71,7 +71,7 @@
 | 本机 Node | `D:\Application\NodeJs\node.exe`（Node 22） |
 | 本机 Chrome | `C:\Program Files\Google\Chrome\Application\chrome.exe` |
 | 当前 Worker 版本 | `304bc04c`（2026-10-25） |
-| 当前本地提交 | `ab807e2`；远端 `86c7415a`（树一致） |
+| 文档基线（代码） | 本地 `ab807e2`；远端 `86c7415a`（树一致）。后续提交以 `git log` 为准 |
 
 ---
 
