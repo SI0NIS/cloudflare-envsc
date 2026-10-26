@@ -13,6 +13,9 @@ jobs:
         with:
           node-version: 24
 
+      - name: 安装依赖
+        run: npm ci
+
       - name: 语法检查
         run: |
           node --check src/index.js
