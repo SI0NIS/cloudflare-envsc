@@ -93,7 +93,8 @@
 ```
 cloudflare-envsc/
 ├── config/
-│   └── project.json        # 业务配置（唯一事实来源）：排除点/公司名/阈值/推送窗口
+│   ├── project.json        # 业务配置（唯一事实来源）：排除点/公司名/阈值/推送窗口
+│   └── yili-hourly-map.json # 企业端小时点 ↔ 伊犁州平台固定站点映射
 ├── src/index.js            # Worker 主程序：取数、判定、文案、推送、看门狗
 ├── wrangler.toml           # Worker 配置：cron、vars、KV 绑定
 ├── tools/
@@ -105,6 +106,7 @@ cloudflare-envsc/
 │   ├── buildtext-test.mjs  # 推送文案回归测试（27 例）
 │   ├── merge-test.mjs      # 标记合并回归测试（28 例）
 │   ├── backfill-test.mjs   # 维护期欠推补推回归测试（19 例）
+│   ├── yili-hourly-fallback-test.mjs # 州平台小时兜底回归测试（21 例）
 │   ├── watchdog-test.mjs   # 看门狗回归测试
 │   └── dump-*.mjs          # 各数据接口裸抓诊断脚本
 ├── relay/                  # 企业端 HTTP → HTTPS 中继（fly.io/Render/Docker，带鉴权，可选）
@@ -113,7 +115,7 @@ cloudflare-envsc/
 
 ## 伊犁州平台数据采集适配器
 
-`tools/yili/` 是独立于日报推送链路的州平台采集分支，支持自动验证码登录、9 个监测点、实时/分钟/小时/日数据、5000 条分页完整性校验及 JSON/CSV/XLSX 输出。凭据与 token 只落在本地忽略目录，不进入仓库。
+`tools/yili/` 提供州平台采集适配器，支持自动验证码登录、9 个监测点、实时/分钟/小时/日数据、5000 条分页完整性校验及 JSON/CSV/XLSX 输出。小时超标告警在企业端不可用时会按固定映射自动改取州平台数据；日报链路保持不变。凭据与 token 只落在本地忽略目录，不进入仓库。
 
 ```powershell
 node tools/yili/cli.mjs stations
@@ -254,24 +256,27 @@ npx wrangler tail                            # 观察定时执行的实时日志
 |---|---|
 | 触发 | Windows 计划任务 `ENVSC-Hourly-Alarm`，每小时 **:20** 运行 `tools/local-sync/hourly-alarm.cjs` |
 | 覆盖时段 | 最近 **2 个已完成小时**（数据晚到可在下一小时补上）；也支持 `--date/--hour` 指定 |
-| 数据源 | 企业端 `online-monitor/data/list`（小时行的实测值/标准值/有效性）+ `online-monitor/view/list`（折算值序列）；因子清单取自 `/monitoritem/pollutant/list` |
+| 数据源 | 优先企业端 `online-monitor/data/list`（小时行的实测值/标准值/有效性）+ `online-monitor/view/list`（折算值序列）；因子清单取自 `/monitoritem/pollutant/list` |
+| 兜底 | 企业端 cookie/监测点/某点某小时不可用时，按 `config/yili-hourly-map.json` 改取伊犁州平台小时数据；正常时不访问州平台，去重键不变 |
 | 因子编码 | 由企业端接口动态获取（**非甲烷总烃=508、颗粒物=001、二氧化硫=002、氮氧化物=003、化学需氧量=011、氨氮=060**），不再硬编码猜测 |
 | 判定口径 | **废气用折算值**、**废水用实测值**（废水无折算）；废水 pH 用 `min_value`/`max_value` 区间判定；仅「数据有效」参与；严格大于标准（`minRatio` 可调） |
 | 两层标准 | **A 级绩效**（`config/standards.json` → `a`）与**排放标准**（配置值优先，未配置时用平台 `outlet_standard`）。A 级：颗粒物 **10**、非甲烷总烃 **30**；排放标准：3号机组/1号2号机组 SO₂ **35**、NOx **50**（GB 13223-2011 超低排放口径），颗粒物 30、非甲烷总烃 100；总排口 pH **6~9**、COD **50**、氨氮 **5**（GB 21903-2008 表3 特别排放限值） |
 | 文案区分 | 仅超 A 级 → `超A级标准 30，超 x%；未超排放标准 100`（标题「A级预警」）；两层均超 → `超排放标准 100，超 x%；A级标准 30 亦超`（标题「小时超标」） |
 | 去重 | KV `alarm:<日期>:<小时>:<监测点>:<因子>:<层级>`（TTL 3 天）；A 级预警升级为排放超标时会再推一次 |
 | 推送 | Bark（`group=小时超标`，`level=timeSensitive`），一次运行合并一条 |
-| 状态 | KV `last-hourly-alarm`（checked / exceeded / exceededLegal / exceededA / pushed / missingStd） |
+| 状态 | KV `last-hourly-alarm`（checked / exceeded / exceededLegal / exceededA / pushed / missingStd / sources） |
 | 配置 | `config/project.json` → `hourlyAlarm`；两层限值 → `config/standards.json` |
 
 手动演练：
 
 ```bash
 node tools/local-sync/hourly-alarm.cjs --date 2026-10-22 --hour 11 --dry-run --verbose
+node tools/local-sync/hourly-alarm.cjs --date 2026-10-25 --hour 10 --dry-run --verbose --yili-only
 ```
 
 > 页面列与接口字段的对照（标干值=`avg_value_<code>`、标准值=`outlet_standard_<code>`，
 > 以及“非甲烷总烃=508”的核实过程）见 [tools/local-sync/README.md](tools/local-sync/README.md#字段与页面核对2026-10-23)。
+> 公开平台没有可直接进行小时浓度阈值判定的完整序列；小时超标兜底顺序为企业端 → 伊犁州平台。
 
 ## 本地开发与测试
 
@@ -281,6 +286,7 @@ node tools/buildtext-test.mjs      # 推送文案规则 27 例
 node tools/merge-test.mjs          # 标记合并规则 28 例
 node tools/backfill-test.mjs       # 欠推登记/双层就绪门控/恢复补推/限流/去重 19 例
 node tools/watchdog-test.mjs       # 看门狗逻辑
+node tools/yili-hourly-fallback-test.mjs # 州平台站点/因子映射与小时兜底 21 例
 ```
 
 运维常用：

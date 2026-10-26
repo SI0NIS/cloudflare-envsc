@@ -21,6 +21,8 @@ jobs:
           node --check src/index.js
           node --check tools/scf-marks-sync/index.js
           node --check tools/local-sync/run_scf_local.cjs
+          node --check tools/local-sync/hourly-alarm.cjs
+          node --check tools/local-sync/lib/yili-hourly-fallback.cjs
           node --check tools/yili/cli.mjs
           node --check tools/yili/lib/captcha.mjs
           node --check tools/yili/lib/client.mjs
@@ -42,6 +44,9 @@ jobs:
 
       - name: 小时超标判定
         run: node tools/hourly-alarm-test.mjs
+
+      - name: 伊犁州小时超标兜底
+        run: node tools/yili-hourly-fallback-test.mjs
 
       - name: 看门狗逻辑
         run: node tools/watchdog-test.mjs

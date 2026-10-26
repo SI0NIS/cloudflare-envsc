@@ -1,0 +1,61 @@
+{
+  "_comment": "企业端小时告警的伊犁州平台兜底映射。站点 ID 固定，禁止按名称模糊匹配；1#/2# 已用 2026-10-25 同时段数值核实。",
+  "_verifiedAt": "2026-10-26",
+  "_verification": "2026-10-25 10:00 企业端 1号2号机组 NOx=38.01/SO2=9.836/颗粒物=0.815，州平台 1# 完全一致；企业端 3号机组 NOx=38.452/SO2=19.548/颗粒物=2.485，州平台 2# 完全一致。",
+  "enterprisePsId": "654000000031",
+  "factorMaps": {
+    "water": {
+      "w01001": { "enterpriseCode": "001", "enterpriseName": "pH", "range": true },
+      "w21003": { "enterpriseCode": "060", "enterpriseName": "氨氮" },
+      "w01018": { "enterpriseCode": "011", "enterpriseName": "化学需氧量" }
+    },
+    "gas": {
+      "a34013": { "enterpriseCode": "001", "enterpriseName": "颗粒物" },
+      "a21026": { "enterpriseCode": "002", "enterpriseName": "二氧化硫" },
+      "a21002": { "enterpriseCode": "003", "enterpriseName": "氮氧化物" },
+      "a24088": { "enterpriseCode": "508", "enterpriseName": "非甲烷总烃" }
+    }
+  },
+  "points": [
+    {
+      "enterpriseId": "65400000003124",
+      "enterpriseName": "总排口",
+      "mpType": 4,
+      "medium": "water",
+      "stationId": "650787506795474944",
+      "stationName": "川宁生物废水总排口"
+    },
+    {
+      "enterpriseId": "654000000031195",
+      "enterpriseName": "生产工艺尾气排放口",
+      "mpType": 5,
+      "medium": "gas",
+      "stationId": "651051140658393088",
+      "stationName": "川宁生物生产工艺尾气排放口"
+    },
+    {
+      "enterpriseId": "654000000031205",
+      "enterpriseName": "环保尾气排放口",
+      "mpType": 5,
+      "medium": "gas",
+      "stationId": "651051512110149632",
+      "stationName": "川宁生物环保尾气排放口"
+    },
+    {
+      "enterpriseId": "65400000003175",
+      "enterpriseName": "1号2号机组",
+      "mpType": 5,
+      "medium": "gas",
+      "stationId": "650788532441214976",
+      "stationName": "川宁生物1#废气排放口"
+    },
+    {
+      "enterpriseId": "65400000003165",
+      "enterpriseName": "3号机组",
+      "mpType": 5,
+      "medium": "gas",
+      "stationId": "650787820260978688",
+      "stationName": "川宁生物2#废气排放口"
+    }
+  ]
+}

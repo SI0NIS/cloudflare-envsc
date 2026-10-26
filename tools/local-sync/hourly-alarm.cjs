@@ -14,19 +14,22 @@
 //   node hourly-alarm.cjs                    # 默认：检查最近 2 个已完成小时
 //   node hourly-alarm.cjs --date 2026-10-22 --hour 15   # 指定小时（补跑/验证）
 //   node hourly-alarm.cjs --dry-run          # 只打印不推送、不写去重
+//   node hourly-alarm.cjs --yili-only        # 跳过企业端，强制验证州平台兜底
 //
-// 依赖：local-config.json（cnemc.cookie/psid、cloudflare、bark）
+// 依赖：local-config.json（cnemc、cloudflare、bark）；州平台凭据/token 见 tools/yili。
 const fs = require('fs');
 const path = require('path');
 const { execFileSync } = require('child_process');
 const { createLogger } = require('./lib/log');
 const { judgeTiers, judgeRange, describeTier, parseStandard, num, cell } = require('./lib/exceed');
+const { createYiliHourlyFallback } = require('./lib/yili-hourly-fallback.cjs');
 
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
 const RUNTIME = path.join(__dirname, 'runtime');
 const CONFIG_FILE = path.join(__dirname, 'local-config.json');
 const COOKIE_FILE = path.join(RUNTIME, 'cnemc-cookie.txt');
 const NAMES_FILE = path.join(RUNTIME, 'factor-names.json');
+const YILI_MAP_FILE = path.join(REPO_ROOT, 'config', 'yili-hourly-map.json');
 const { log } = createLogger('hourly-alarm', path.join(RUNTIME, 'logs'));
 
 const ROUTER = 'http://116.178.28.170:3080/amOnline/app/baseroute/requestRoute!list.page';
@@ -95,6 +98,7 @@ const verbose = args.includes('--verbose');
 const dateArg = args.find((a) => /^\d{4}-\d{2}-\d{2}$/.test(a));
 const hourIdx = args.indexOf('--hour');
 const hourArg = hourIdx >= 0 ? Number(args[hourIdx + 1]) : null;
+const yiliOnly = args.includes('--yili-only');
 
 // 目标小时（北京时间整点，毫秒）
 function targetHours() {
@@ -260,26 +264,47 @@ async function pushBark(title, body) {
 
   if (!ALARM.enabled) { log('hourlyAlarm.enabled=false → 跳过'); process.exit(0); }
 
-  const cookie = await ensureCookie();
-  if (!cookie) {
-    log('=== 失败（cookie 不可用，每日同步会另行告警）===');
-    if (!dryRun && CF.apiToken) {
-      try { await kvPut('last-hourly-alarm', JSON.stringify({ at: new Date().toISOString(), ok: false, error: 'cookie 不可用' })); } catch (e) { /* ignore */ }
-    }
-    process.exit(1);
+  let yiliFallback = null;
+  try {
+    yiliFallback = createYiliHourlyFallback({ mapFile: YILI_MAP_FILE, log });
+    log(`州平台兜底映射：${yiliFallback.points.map((p) => `${p.name}→${p.stationName}`).join('；')}`);
+  } catch (e) {
+    log(`WARN 州平台兜底不可用：${e.message}`);
   }
 
-  let mps;
-  try { mps = await getMps(cookie); }
-  catch (e) {
-    log(`=== 失败（取监测点）：${e.message} ===`);
-    process.exit(1);
+  const cookie = yiliOnly ? null : await ensureCookie();
+  let enterpriseAvailable = false;
+  let mps = [];
+  if (!yiliOnly && cookie) {
+    try {
+      mps = await getMps(cookie);
+      enterpriseAvailable = mps.length > 0;
+      if (!enterpriseAvailable) log('WARN 企业端未返回监测点');
+    } catch (e) {
+      log(`WARN 企业端取监测点失败：${e.message}`);
+    }
+  } else if (!yiliOnly) {
+    log('WARN 企业端 cookie 不可用');
+  }
+
+  if (!enterpriseAvailable) {
+    if (!yiliFallback || !yiliFallback.points.length) {
+      log('=== 失败（企业端不可用，州平台兜底未配置）===');
+      if (!dryRun && CF.apiToken) {
+        try { await kvPut('last-hourly-alarm', JSON.stringify({ at: new Date().toISOString(), ok: false, error: '企业端不可用且州平台兜底未配置' })); } catch (e) { /* ignore */ }
+      }
+      process.exit(1);
+    }
+    mps = yiliFallback.points.map((p) => ({ id: p.id, name: p.name, mpType: p.mpType }));
+    log(`${yiliOnly ? '--yili-only' : '企业端不可用'} → 州平台兜底 ${mps.length} 个监测点`);
   }
 
   // 按日期取小时行（每个日期只取一次/点）
   const dates = [...new Set(hourKeys.map((h) => h.date))];
   const factorMap = new Map(); // mpId -> [{code,name,unit}]（每个监测点只问一次）
-  for (const mp of mps) factorMap.set(mp.id, await getPointFactors(cookie, mp));
+  if (enterpriseAvailable) {
+    for (const mp of mps) factorMap.set(mp.id, await getPointFactors(cookie, mp));
+  }
   // 企业端因子名并入缓存（供后续运行/排查；失败不影响主流程）
   let namesChanged = false;
   for (const mp of mps) {
@@ -296,25 +321,151 @@ async function pushBark(title, body) {
   const missingStd = new Set(); // 有数值但两层标准都没有（无法判定）的因子
   const stdPairs = new Set(); // A 级严于排放标准的因子（用于日志说明）
   let checkedFactors = 0;
+  const stats = {
+    enterpriseRows: 0, yiliRows: 0, yiliErrors: 0, yiliMissing: 0,
+    enterpriseErrors: 0, missingHours: 0, unmapped: 0,
+  };
+  const unmappedWarned = new Set();
+
+  function standardChoice(mpName, code, isGas, platformLimit, platformLabel) {
+    const platformText = platformLimit == null ? null : String(platformLimit).trim();
+    const platform = platformText && platformText !== '--' && platformText !== '/' ? platformText : null;
+    const stdA = tierStd(TIER_A, mpName, code, isGas);
+    const localLegal = tierStd(TIER_LEGAL, mpName, code, isGas);
+    const stdLegal = localLegal != null ? localLegal : platform;
+    let stdLegalSource;
+    if (localLegal != null) {
+      stdLegalSource = platform != null && String(localLegal) !== platform ? `配置表(覆盖${platformLabel || '平台'})` : '配置表';
+    } else {
+      stdLegalSource = platform != null ? (platformLabel || '平台') : '缺失';
+    }
+    return { stdA, stdLegal, stdLegalSource };
+  }
+
+  function addStandardPair(mpName, code, stdA, stdLegal) {
+    if (stdA == null || stdLegal == null) return;
+    const na = Number(stdA), nl = Number(stdLegal);
+    if (Number.isFinite(na) && Number.isFinite(nl) && na < nl) {
+      stdPairs.add(`${mpName}/${code}：A级 ${stdA} ／ 排放 ${stdLegal}`);
+    }
+  }
+
+  function buildYiliPerCode(fb, mp, isGas) {
+    const perCode = {};
+    const nameByCode = {};
+    for (const factor of fb.factors || []) {
+      const choice = standardChoice(mp.name, factor.code, isGas, factor.limit, '州平台');
+      if (choice.stdA == null && choice.stdLegal == null) {
+        if (!/^[SB]\d{2}$/i.test(factor.code)) missingStd.add(`${mp.name}/${factor.code}`);
+        continue;
+      }
+      addStandardPair(mp.name, factor.code, choice.stdA, choice.stdLegal);
+      perCode[factor.code] = {
+        value: factor.value,
+        zs: factor.zs,
+        minV: factor.minV,
+        maxV: factor.maxV,
+        isRange: factor.isRange,
+        stdA: choice.stdA,
+        stdLegal: choice.stdLegal,
+        flag: factor.flag,
+        stdLegalSource: choice.stdLegalSource,
+      };
+      nameByCode[factor.code] = factor.name || factorName(mp.id, factor.code);
+    }
+    return { perCode, nameByCode };
+  }
+
+  function evaluatePerCode(hk, mp, isGas, perCode, nameByCode, source) {
+    const sourceLabel = source === 'yili' ? '州平台' : '企业端';
+    for (const [code, pc] of Object.entries(perCode)) {
+      const ev = pc.isRange
+        ? judgeRange(pc.minV, pc.maxV, pc.stdA, pc.stdLegal, pc.flag, {
+          requireValid: ALARM.requireValid, minRatio: ALARM.minRatio,
+        })
+        : judgeTiers(pc.value, pc.zs, pc.stdA, pc.stdLegal, pc.flag, {
+          requireValid: ALARM.requireValid,
+          minRatio: ALARM.minRatio,
+          useZs: isGas && ALARM.compare !== 'avg_value',
+        });
+      if (!ev) continue;
+      checkedFactors++;
+      if (verbose) {
+        const shown = ev.range ? `${ev.valueMin}~${ev.valueMax}` : `${ev.value}${ev.zs == null ? '' : `(折算 ${ev.zs})`}`;
+        log(`  [eval] ${hk.date} ${hk.hour}时 ${mp.name} ${code} 值=${shown} A级=${ev.stdA == null ? '-' : ev.stdA} 排放=${ev.stdLegal == null ? '-' : ev.stdLegal}(${pc.stdLegalSource}) rA=${ev.ratioA == null ? '-' : ev.ratioA.toFixed(3)} rL=${ev.ratioLegal == null ? '-' : ev.ratioLegal.toFixed(3)} flag=${ev.flag} valid=${ev.valid} source=${sourceLabel}`);
+      }
+      if (!ev.exceeded) continue;
+      const key = `${hk.date} ${hk.hour}`;
+      if (!hitByHour.has(key)) hitByHour.set(key, []);
+      hitByHour.get(key).push({
+        mp: mp.name, code, name: nameByCode[code] || factorName(mp.id, code),
+        ...ev, hourKey: key, isGas, stdLegalSource: pc.stdLegalSource, source,
+      });
+    }
+  }
+
+  async function tryYili(mp, hk) {
+    if (!yiliFallback) return null;
+    if (!yiliFallback.findPoint(mp)) {
+      stats.unmapped++;
+      if (!unmappedWarned.has(mp.name)) {
+        log(`WARN ${mp.name} 未配置州平台站点映射，无法兜底`);
+        unmappedWarned.add(mp.name);
+      }
+      return null;
+    }
+    const fb = await yiliFallback.getHour(mp, hk);
+    if (fb.status === 'ok') {
+      stats.yiliRows++;
+      log(`FALLBACK ${hk.date} ${hk.hour}时 ${mp.name} ← ${fb.point.stationName}${fb.showType ? ` [${fb.showType}]` : ''}`);
+      return fb;
+    }
+    if (fb.status === 'missing') {
+      stats.yiliMissing++;
+      log(`WARN ${hk.date} ${hk.hour}时 ${mp.name} 州平台无该小时数据`);
+    } else if (fb.status === 'empty') {
+      stats.yiliMissing++;
+      log(`WARN ${hk.date} ${hk.hour}时 ${mp.name} 州平台无可用判定因子`);
+    } else if (fb.status === 'error') {
+      stats.yiliErrors++;
+    }
+    return null;
+  }
+
   for (const day of dates) {
     for (const mp of mps) {
       const factors = factorMap.get(mp.id);
       const codes = factors ? factors.map((f) => f.code) : DEFAULT_CODES;
       const nameByCode = {};
       if (factors) for (const f of factors) if (f.name) nameByCode[f.code] = f.name;
-      let rows;
-      try { rows = await getHourRows(cookie, mp, day, codes); }
-      catch (e) { log(`WARN ${day} ${mp.name} 取数失败：${e.message}`); continue; }
+      let rows = [];
+      if (enterpriseAvailable) {
+        try { rows = await getHourRows(cookie, mp, day, codes); }
+        catch (e) {
+          stats.enterpriseErrors++;
+          log(`WARN ${day} ${mp.name} 企业端取数失败：${e.message}`);
+        }
+      }
       const isGas = String(mp.mpType) !== '4'; // mpType=4 为废水（无折算）；其余按废气
       let viewRows = null;
-      if (isGas) {
+      if (enterpriseAvailable && isGas && rows.length) {
         try { viewRows = await getViewRows(cookie, mp, day); }
         catch (e) { log(`WARN ${day} ${mp.name} 折算序列取数失败：${e.message}（退回实测）`); }
       }
       for (const hk of hourKeys.filter((x) => x.date === day)) {
         const prefix = `${day} ${String(hk.hour).padStart(2, '0')}`;
         const row = rows.find((r) => String((r.data_time && r.data_time.item && r.data_time.item.label) || '').startsWith(prefix));
-        if (!row) continue;
+        if (!row) {
+          const fb = await tryYili(mp, hk);
+          if (fb) {
+            const built = buildYiliPerCode(fb, mp, isGas);
+            evaluatePerCode(hk, mp, isGas, built.perCode, built.nameByCode, 'yili');
+          } else if (!yiliFallback || !yiliFallback.findPoint(mp)) {
+            stats.missingHours++;
+          }
+          continue;
+        }
+        stats.enterpriseRows++;
         // ① 实测/有效性 + 两层标准：
         //    A 级 = 配置表；排放标准 = 配置表优先（GB 限值），未配置时用平台 outlet_standard。
         //    废水 pH 用 min_value/max_value 区间判定。
@@ -329,28 +480,25 @@ async function pushBark(title, body) {
           const sPlatformRaw = (cell(row, `outlet_standard_${code}`) || {}).label;
           const sPlatform = sPlatformRaw && String(sPlatformRaw).trim() !== '--' ? String(sPlatformRaw).trim() : null;
           const f = (cell(row, `flag_${code}`) || {}).label || '';
-          const sA = tierStd(TIER_A, mp.name, code, isGas);
-          const sLocalLegal = tierStd(TIER_LEGAL, mp.name, code, isGas);
-          // 配置表优先（用于 GB 13223 / GB 21903 等法定限值覆盖平台值）
-          const sLegal = sLocalLegal != null ? sLocalLegal : sPlatform;
-          const stdLegalSource = sLocalLegal != null
-            ? (sPlatform != null && String(sLocalLegal) !== sPlatform ? '配置表(覆盖平台)' : '配置表')
-            : '平台';
-          if (sA == null && sLegal == null) {
+          const choice = standardChoice(mp.name, code, isGas, sPlatform, '平台');
+          if (choice.stdA == null && choice.stdLegal == null) {
             // 工况参数（S0x/B0x）本身没有限值，不计入"缺标准"
             if (!/^[SB]\d{2}$/i.test(code)) missingStd.add(`${mp.name}/${code}`);
             continue;
           }
-          if (sA != null && sLegal != null) {
-            const na = Number(sA), nl = Number(sLegal);
-            if (Number.isFinite(na) && Number.isFinite(nl) && na < nl) {
-              stdPairs.add(`${mp.name}/${code}：A级 ${sA} ／ 排放 ${sLegal}`);
-            }
-          }
+          addStandardPair(mp.name, code, choice.stdA, choice.stdLegal);
           perCode[code] = {
             value: isRange ? maxV : v, minV, maxV, isRange,
-            stdA: sA, stdLegal: sLegal, flag: f, stdLegalSource,
+            stdA: choice.stdA, stdLegal: choice.stdLegal, flag: f, stdLegalSource: choice.stdLegalSource,
           };
+        }
+        if (!Object.keys(perCode).length) {
+          const fb = await tryYili(mp, hk);
+          if (fb) {
+            const built = buildYiliPerCode(fb, mp, isGas);
+            evaluatePerCode(hk, mp, isGas, built.perCode, built.nameByCode, 'yili');
+          }
+          continue;
         }
         // ② 废气折算：view/list 的 avg_zs[hour]（数组下标 = 小时）；用实测值匹配到因子编码
         const zsByCode = {};
@@ -365,33 +513,33 @@ async function pushBark(title, body) {
             if (hit) zsByCode[hit[0]] = hz;
           }
         }
-        // ③ 判定：废气用折算（有则用）、废水用实测；pH 用区间；同时比对两层标准
-        for (const [code, pc] of Object.entries(perCode)) {
-          const ev = pc.isRange
-            ? judgeRange(pc.minV, pc.maxV, pc.stdA, pc.stdLegal, pc.flag, {
-              requireValid: ALARM.requireValid, minRatio: ALARM.minRatio,
-            })
-            : judgeTiers(pc.value, zsByCode[code], pc.stdA, pc.stdLegal, pc.flag, {
-              requireValid: ALARM.requireValid,
-              minRatio: ALARM.minRatio,
-              useZs: isGas && ALARM.compare !== 'avg_value',
-            });
-          if (!ev) continue;
-          checkedFactors++;
-          if (verbose) {
-            const shown = ev.range ? `${ev.valueMin}~${ev.valueMax}` : `${ev.value}${ev.zs == null ? '' : `(折算 ${ev.zs})`}`;
-            log(`  [eval] ${hk.date} ${hk.hour}时 ${mp.name} ${code} 值=${shown} A级=${ev.stdA == null ? '-' : ev.stdA} 排放=${ev.stdLegal == null ? '-' : ev.stdLegal}(${pc.stdLegalSource}) rA=${ev.ratioA == null ? '-' : ev.ratioA.toFixed(3)} rL=${ev.ratioLegal == null ? '-' : ev.ratioLegal.toFixed(3)} flag=${ev.flag} valid=${ev.valid}`);
-          }
-          if (!ev.exceeded) continue;
-          const key = `${hk.date} ${hk.hour}`;
-          if (!hitByHour.has(key)) hitByHour.set(key, []);
-          hitByHour.get(key).push({
-            mp: mp.name, code, name: nameByCode[code] || factorName(mp.id, code),
-            ...ev, hourKey: key, isGas, stdLegalSource: pc.stdLegalSource,
-          });
-        }
+        for (const [code, pc] of Object.entries(perCode)) pc.zs = zsByCode[code];
+        evaluatePerCode(hk, mp, isGas, perCode, nameByCode, 'enterprise');
       }
     }
+  }
+
+  const sourceStats = {
+    enterpriseRows: stats.enterpriseRows,
+    yiliRows: stats.yiliRows,
+    yiliErrors: stats.yiliErrors,
+    yiliMissing: stats.yiliMissing,
+    enterpriseErrors: stats.enterpriseErrors,
+    missingHours: stats.missingHours,
+    unmapped: stats.unmapped,
+  };
+  log(`数据源：企业端 ${sourceStats.enterpriseRows} 行；州平台兜底 ${sourceStats.yiliRows} 行；州平台失败 ${sourceStats.yiliErrors}，缺失 ${sourceStats.yiliMissing + sourceStats.missingHours}`);
+  if (!sourceStats.enterpriseRows && !sourceStats.yiliRows) {
+    log('=== 失败（企业端与州平台均未取得可用小时数据）===');
+    if (!dryRun && CF.apiToken) {
+      try {
+        await kvPut('last-hourly-alarm', JSON.stringify({
+          at: new Date().toISOString(), ok: false, error: '企业端与州平台均未取得可用小时数据',
+          checked: checkedFactors, sources: sourceStats,
+        }));
+      } catch (e) { /* ignore */ }
+    }
+    process.exit(1);
   }
 
   const all = [...hitByHour.entries()].flatMap(([hourKey, items]) => items.map((it) => ({ ...it, hourKey })));
@@ -415,7 +563,7 @@ async function pushBark(title, body) {
   if (!fresh.length) {
     log('=== 完成（无新增超标）===');
     if (!dryRun && CF.apiToken) {
-      try { await kvPut('last-hourly-alarm', JSON.stringify({ at: new Date().toISOString(), ok: true, checked: checkedFactors, exceeded: all.length, exceededLegal: nLegal, exceededA: nA, pushed: 0, missingStd: missingStd.size, missingSample: [...missingStd].slice(0, 20) })); } catch (e) { /* ignore */ }
+      try { await kvPut('last-hourly-alarm', JSON.stringify({ at: new Date().toISOString(), ok: true, checked: checkedFactors, exceeded: all.length, exceededLegal: nLegal, exceededA: nA, pushed: 0, missingStd: missingStd.size, missingSample: [...missingStd].slice(0, 20), sources: sourceStats, yiliFallback: !!yiliFallback })); } catch (e) { /* ignore */ }
     }
     process.exit(0);
   }
@@ -431,13 +579,16 @@ async function pushBark(title, body) {
     return `· ${it.hourKey.slice(5)}时 ${it.mp} ${it.name} ${head}${val}${extra}（${describeTier(it)}）`;
   });
   if (fresh.length > shown.length) lines.push(`…另有 ${fresh.length - shown.length} 条未展示`);
+  if (fresh.some((it) => it.source === 'yili')) {
+    lines.push(`数据源：伊犁州平台${fresh.some((it) => it.source !== 'yili') ? '（部分点位兜底）' : '（企业端不可用兜底）'}`);
+  }
   const body = lines.join('\n');
   const anyLegal = fresh.some((it) => it.exceedLegal);
   const title = `${anyLegal ? '⚠️ 小时超标' : '⚠️ A级预警'} ${fresh[0].hourKey.slice(0, 10)}`;
 
   for (const it of shown) {
     const shownVal = it.range ? `${it.valueMin}~${it.valueMax}` : it.judged;
-    log(`EXCEED ${it.hourKey} ${it.mp} ${it.name}=${shownVal} A级=${it.stdA == null ? '-' : it.stdA} 排放=${it.stdLegal == null ? '-' : it.stdLegal} tier=${it.tier} flag=${it.flag}`);
+    log(`EXCEED ${it.hourKey} ${it.mp} ${it.name}=${shownVal} A级=${it.stdA == null ? '-' : it.stdA} 排放=${it.stdLegal == null ? '-' : it.stdLegal} tier=${it.tier} flag=${it.flag} source=${it.source === 'yili' ? '州平台' : '企业端'}`);
   }
 
   if (dryRun) {
@@ -460,6 +611,7 @@ async function pushBark(title, body) {
         exceeded: all.length, exceededLegal: nLegal, exceededA: nA,
         pushed: r.ok ? shown.length : 0, title,
         missingStd: missingStd.size, missingSample: [...missingStd].slice(0, 20),
+        sources: sourceStats, yiliFallback: !!yiliFallback,
       }));
     } catch (e) { /* ignore */ }
   }

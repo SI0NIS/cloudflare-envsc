@@ -15,7 +15,7 @@
 
 1. **抓标记**：从企业端自动监控平台抓取前一天的分钟级标记（人工填报 + 系统自动标记），写入 Cloudflare KV；
 2. **推日报**：每天 15:00–20:00 整点，Cloudflare Worker 读取公开平台的有效传输率 + KV 里的分钟级标记，合成日报并通过 Bark 推送（成功后当天不再重复）；
-3. **小时超标告警**：本机每小时 :20 检查最近两个已完成小时，按「A 级绩效标准 + 排放标准」两层判定，超标推 Bark。
+3. **小时超标告警**：本机每小时 :20 检查最近两个已完成小时，按「A 级绩效标准 + 排放标准」两层判定，超标推 Bark；企业端不可用时自动改取伊犁州平台小时数据兜底。
 
 另有一条**本机兜底**链路：每天 14:40 由 Windows 计划任务执行同步（云函数已停用），cookie 失效时自动登录续期。
 
@@ -49,7 +49,7 @@
           用户手机 Bark
 
 本机另有：
-  ENVSC-Hourly-Alarm  每小时 :20  → 企业端小时数据 → 两层标准判定 → Bark
+  ENVSC-Hourly-Alarm  每小时 :20  → 企业端小时数据（不可用时州平台兜底）→ 两层标准判定 → Bark
   ENVSC-SCF-Local-Sync-Logon  登录时 → 仅补缺（--if-missing）
 ```
 
@@ -206,17 +206,17 @@ cloudflare-envsc/
 │   ├── local-sync/
 │   │   ├── run_scf_local.cjs     # 本机同步入口（cookie 校验/续期、KV 预检、告警）
 │   │   ├── hourly-alarm.cjs      # 小时超标告警
-│   │   ├── lib/{log.js,exceed.js}# 日志轮转、判定纯函数
+│   │   ├── lib/{log.js,exceed.js,yili-hourly-fallback.cjs} # 日志、判定、州平台兜底
 │   │   ├── auto-login/           # Puppeteer 自动登录 + 滑块
 │   │   ├── local-config.json     # 密钥（gitignore）
 │   │   └── runtime/              # cookie、日志、factor-names.json（gitignore）
 │   ├── push-now.mjs              # 手动生成/补推某天日报
-│   ├── yili/                     # 伊犁州平台采集适配器（独立分支，不影响 Worker）
+│   ├── yili/                     # 伊犁州平台采集适配器 + 小时告警兜底数据源
 │   │   ├── cli.mjs               # stations/factors/query/captcha/export/auth
 │   │   ├── lib/{client,captcha,config,http,errors}.mjs
 │   │   ├── captcha-model.json    # 200 原型验证码模型
 │   │   └── runtime/              # token、验证码临时文件（gitignore）
-│   ├── *-test.mjs                # 9 套回归测试（含 yili-test.mjs）
+│   ├── *-test.mjs                # 10 套回归测试（含 yili 两套）
 │   └── dump-*.mjs / kv-read.py   # 诊断脚本
 ├── docs/{CREDENTIALS.md, HANDOVER.md}
 ├── .github/workflows/test.yml    # CI：push/PR 跑全部测试
@@ -312,8 +312,10 @@ cloudflare-envsc/
 - 检查最近 **2 个已完成小时**（`--date/--hour` 可补跑）；
 - 因子清单动态获取；废气用折算值（`view/list` 的 `avg_zs`，缺则实测），废水用实测；
 - pH 用 `min_value_001` / `max_value_001` 与 6~9 区间比较；
+- 企业端 cookie/监测点/某点某小时不可用时，按 `config/yili-hourly-map.json` 的固定站点 ID 改取州平台 `hour` 数据；正常时不访问州平台；
+- 州平台只把 `N` 视为有效，`C/D/空` 不参与判定；废气优先 `zsValue`，pH 用 `metrics.min/max`；
 - 去重键 `alarm:<date>:<hour>:<mp>:<code>:<tier>`（A 级/排放分开，先预警后升级会再推）；
-- 状态写 KV `last-hourly-alarm`（checked/exceeded/exceededLegal/exceededA/missingStd）。
+- 状态写 KV `last-hourly-alarm`（checked/exceeded/exceededLegal/exceededA/missingStd/sources）。
 
 ### 7.4 KV 键一览
 
@@ -448,10 +450,12 @@ node tools\local-sync\run_scf_local.cjs 2026-10-24 1 --force
 node tools\local-sync\auto-login\auto-login.cjs
 # 小时告警演练（指定小时，打印不推送）
 node tools\local-sync\hourly-alarm.cjs --date 2026-10-25 --hour 10 --dry-run --verbose
+# 强制州平台兜底演练
+node tools\local-sync\hourly-alarm.cjs --date 2026-10-25 --hour 10 --dry-run --verbose --yili-only
 # 补推某天日报（需 CF_ACC/CF_NS/CF_TOK + BARK_KEY）
 node tools\push-now.mjs 2026-10-24
 # 全量测试
-for %f in (buildtext marksv2 merge windows hourly-alarm watchdog pubfail backfill) do node tools\%f-test.mjs
+for %f in (buildtext marksv2 merge windows hourly-alarm watchdog pubfail backfill yili-hourly-fallback) do node tools\%f-test.mjs
 ```
 
 ### 11.3 故障排查表
@@ -467,6 +471,7 @@ for %f in (buildtext marksv2 merge windows hourly-alarm watchdog pubfail backfil
 | GitHub 推送 403 | Token 缺 Contents 或 Workflows 权限 | 补权限；`.github/workflows/*` 需 Workflows: Read and write |
 | 计划任务没跑 | 电脑关机/休眠 | 任务设为 `StartWhenAvailable`，开机补跑（可能晚于 15:00） |
 | 小时告警无数据 | 该小时未发布/flag 非「数据有效」 | 属正常；`missingStd` 可在 `standards.json` 补 |
+| 企业端小时取数失败 | cookie/内网/接口故障 | 看日志 `FALLBACK`；脚本会自动改取州平台，`sources.yiliRows` 可见兜底行数 |
 
 ---
 
@@ -477,9 +482,10 @@ for %f in (buildtext marksv2 merge windows hourly-alarm watchdog pubfail backfil
 - [ ] `hourly-alarm.cjs --dry-run --verbose` 能列出 5 个点的数值因子，`missingStd=0`
 - [ ] 三个计划任务状态 `Ready`，NextRun 分别为 14:40 / 登录时 / 每小时 :20
 - [ ] Bark 测试消息能收到（`curl -X POST https://api.day.app/<key> -H "Content-Type: application/json" -d '{"title":"test","body":"ok"}'`）
-- [ ] 全量测试 **189/189 PASS**（既有点位 144 + 伊犁适配器 45）
+- [ ] 全量测试 **210/210 PASS**（既有点位 144 + 伊犁适配器 45 + 小时兜底 21）
 - [ ] `node tools/yili/cli.mjs stations` 返回 9 个监测点
 - [ ] 废气实时 17275 行按 4 页取全，`dt` 唯一
+- [ ] `--yili-only --dry-run --verbose` 能列出 5 个点，且 `1号2号机组/3号机组` 的 NOx/SO₂/颗粒物与企业端同小时一致
 - [ ] `last-result.backfill.pendingDates` 与 KV 实际缺失日期一致，恢复后自动清空
 - [ ] Worker 定时为 `0 7-12 * * *`，`last-result` 可读
 - [ ] 仓库 `main` 与本地树一致（或已知差异）
@@ -490,7 +496,8 @@ for %f in (buildtext marksv2 merge windows hourly-alarm watchdog pubfail backfil
 
 | 提交 | 内容 |
 |---|---|
-| 本次提交（2026-10-26） | 新增伊犁州平台采集分支：自动验证码、token 续期、9 点/四类数据、URL 分页完整性校验、JSON/CSV/XLSX；新增 45 项适配器测试 |
+| 本次提交（2026-10-26） | 小时超标告警新增伊犁州平台兜底：5 对固定站点映射、N/C/D 有效性、折算/pH 区间、小时缓存、`--yili-only` 演练；新增 21 项回归测试 |
+| `d59c326` | 新增伊犁州平台采集分支：自动验证码、token 续期、9 点/四类数据、URL 分页完整性校验、JSON/CSV/XLSX；45 项适配器测试 |
 | 本地未提交（2026-10-25） | 维护期欠推自动补推；双层就绪门控；`not_ready` 保留队列；Node 24（本机/CI/`engines`）；新增 19 项补推回归 |
 | `ab807e2` | 修复 10-24 `say` 崩溃；企业端因子名兜底；Worker 失败每天告警；新增 pubfail 测试 |
 | `673ee46` | 废水因子接入（mpType=1）；pH 区间判定；火电 SO₂ 35/NOx 50；总排口 COD 50/氨氮 5 |
@@ -517,4 +524,7 @@ for %f in (buildtext marksv2 merge windows hourly-alarm watchdog pubfail backfil
 - 已验证：自动登录、9 个监测点、四类数据；废气实时 17275 行按 4 页取全且时间唯一；
 - 关键约束：`pageNum/pageSize` 必须同时放 URL query；只放请求体会固定返回 10 行；
 - 凭据：`YILI_USERNAME/YILI_PASSWORD` 环境变量或 `tools/yili/local-config.json`；token 缓存 `tools/yili/runtime/token.json`，均不入库；
-- 测试：`node tools/yili-test.mjs`（45 项）。
+- 测试：`node tools/yili-test.mjs`（45 项）、`node tools/yili-hourly-fallback-test.mjs`（21 项）；
+- 小时超标兜底：`config/yili-hourly-map.json` 固定 5 对站点；1#/2# 已用 2026-10-25 10 时逐值核实为“1号2号机组/3号机组”；
+- 兜底口径：仅 `N` 有效，废气优先 `zsValue`，pH 用 `metrics.min/max`，沿用企业端标准与去重键；公开平台无完整小时浓度序列，不参与该兜底判定；
+- 演练：`node tools/local-sync/hourly-alarm.cjs --date 2026-10-25 --hour 10 --dry-run --verbose --yili-only`。
