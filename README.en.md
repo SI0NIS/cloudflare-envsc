@@ -239,7 +239,7 @@ The cron in `wrangler.toml` is in **UTC**: `0 7-12 * * *` = **15:00–20:00 CST 
 - A successful push writes the KV dedup key, so you're disturbed at most once a day; title-only (all-compliant) days write it too.
 - Failed/maintenance days enter the pending queue; after recovery D-1 is pushed first, then missing days are backfilled oldest-first within the per-run budget.
 
-## Hourly Exceedance Alerts (added 2026-10-23)
+## Hourly Data Anomaly / Exceedance Alerts (added 2026-10-23)
 
 The platform only offers query APIs — no push. A local runner closes the loop:
 
@@ -249,12 +249,12 @@ The platform only offers query APIs — no push. A local runner closes the loop:
 | Window | The last **2 completed hours** (late data is caught on the next run); `--date/--hour` for manual checks |
 | Sources | Enterprise `online-monitor/data/list` (measured value / standard / validity) + `online-monitor/view/list` (converted series); factor codes from `/monitoritem/pollutant/list` |
 | Factor codes | Resolved at runtime (**NMHC=508**, PM=001, SO₂=002, NOₓ=003, COD=011, ammonia nitrogen=060) instead of hard-coded guesses |
-| Rule | **Gas uses the converted value**; **wastewater uses the measured value** (no conversion exists); wastewater pH uses `min_value`/`max_value` range judging; only `数据有效` rows are judged; strictly greater than the standard (`minRatio` configurable) |
+| Rule | **Gas uses the converted value**; **wastewater uses the measured value** (no conversion exists); wastewater pH uses `min_value`/`max_value` range judging; only `数据有效` rows are judged; strictly greater than the standard (`minRatio` configurable); a valid negative value on a main factor is also pushed as a data anomaly |
 | Two tiers | **Class A** (`config/standards.json` → `a`) and **emission standard** (configured value first, then platform `outlet_standard`). Class A: PM **10**, NMHC **30**; emission standard: SO₂ **35**, NOₓ **50** for units 3 / 1-2 (GB 13223-2011 ultra-low), PM 30, NMHC 100; outfall pH **6~9**, COD **50**, ammonia nitrogen **5** (GB 21903-2008 Table 3 special limits) |
-| Wording | A-level only → `超A级标准 30，超 x%；未超排放标准 100` (title “A级预警”); both → `超排放标准 100，超 x%；A级标准 30 亦超` (title “小时超标”) |
+| Wording | A-level only → `超A级标准 30，超 x%；未超排放标准 100` (title “A级预警”); both → `超排放标准 100，超 x%；A级标准 30 亦超` (title “小时数据异常”); valid negative → `实测 -x，折算 -y（数据有效，异常负值）` (title “小时数据异常”) |
 | Dedup | KV `alarm:<date>:<hour>:<point>:<factor>:<tier>` (3-day TTL); an A-level warning escalates to a separate exceedance alert |
-| Push | Bark (`group=小时超标`, `timeSensitive`), one message per run |
-| Status | KV `last-hourly-alarm` (checked / exceeded / exceededLegal / exceededA / pushed / missingStd) |
+| Push | Bark (`group=小时数据异常`, `timeSensitive`), one message per run |
+| Status | KV `last-hourly-alarm` (checked / exceeded / exceededLegal / exceededA / negative / pushed / missingStd) |
 
 Manual dry run:
 

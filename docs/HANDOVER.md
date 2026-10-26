@@ -15,7 +15,7 @@
 
 1. **抓标记**：从企业端自动监控平台抓取前一天的分钟级标记（人工填报 + 系统自动标记），写入 Cloudflare KV；
 2. **推日报**：每天 15:00–20:00 整点，Cloudflare Worker 读取公开平台的有效传输率 + KV 里的分钟级标记，合成日报并通过 Bark 推送（成功后当天不再重复）；
-3. **小时超标告警**：本机每小时 :20 检查最近两个已完成小时，按「A 级绩效标准 + 排放标准」两层判定，超标推 Bark；企业端不可用时自动改取伊犁州平台小时数据兜底。
+3. **小时数据异常/超标告警**：本机每小时 :20 检查最近两个已完成小时，按「A 级绩效标准 + 排放标准」两层判定，超标或数据有效负值推 Bark；企业端不可用时自动改取伊犁州平台小时数据兜底。
 
 另有一条**本机兜底**链路：每天 14:40 由 Windows 计划任务执行同步（云函数已停用），cookie 失效时自动登录续期。
 
@@ -205,7 +205,7 @@ cloudflare-envsc/
 │   ├── scf-marks-sync/index.js   # 标记同步核心（本机与云函数同一份）
 │   ├── local-sync/
 │   │   ├── run_scf_local.cjs     # 本机同步入口（cookie 校验/续期、KV 预检、告警）
-│   │   ├── hourly-alarm.cjs      # 小时超标告警
+│   │   ├── hourly-alarm.cjs      # 小时数据异常/超标告警
 │   │   ├── lib/{log.js,exceed.js,yili-hourly-fallback.cjs} # 日志、判定、州平台兜底
 │   │   ├── auto-login/           # Puppeteer 自动登录 + 滑块
 │   │   ├── local-config.json     # 密钥（gitignore）
@@ -307,15 +307,16 @@ cloudflare-envsc/
 自动标记：非甲烷总烃 校准 10:11~10:18(8min)
 ```
 
-### 7.3 小时超标告警（本机每小时 :20）
+### 7.3 小时数据异常/超标告警（本机每小时 :20）
 
 - 检查最近 **2 个已完成小时**（`--date/--hour` 可补跑）；
 - 因子清单动态获取；废气用折算值（`view/list` 的 `avg_zs`，缺则实测），废水用实测；
 - pH 用 `min_value_001` / `max_value_001` 与 6~9 区间比较；
+- 主监测因子为 `数据有效` 但小时值为负 → 按数据异常推送；标题/分组为「小时数据异常」，去重 tier=`negative`；
 - 企业端 cookie/监测点/某点某小时不可用时，按 `config/yili-hourly-map.json` 的固定站点 ID 改取州平台 `hour` 数据；正常时不访问州平台；
 - 州平台只把 `N` 视为有效，`C/D/空` 不参与判定；废气优先 `zsValue`，pH 用 `metrics.min/max`；
 - 去重键 `alarm:<date>:<hour>:<mp>:<code>:<tier>`（A 级/排放分开，先预警后升级会再推）；
-- 状态写 KV `last-hourly-alarm`（checked/exceeded/exceededLegal/exceededA/missingStd/sources）。
+- 状态写 KV `last-hourly-alarm`（checked/exceeded/exceededLegal/exceededA/negative/missingStd/sources）。
 
 ### 7.4 KV 键一览
 
@@ -482,7 +483,7 @@ for %f in (buildtext marksv2 merge windows hourly-alarm watchdog pubfail backfil
 - [ ] `hourly-alarm.cjs --dry-run --verbose` 能列出 5 个点的数值因子，`missingStd=0`
 - [ ] 三个计划任务状态 `Ready`，NextRun 分别为 14:40 / 登录时 / 每小时 :20
 - [ ] Bark 测试消息能收到（`curl -X POST https://api.day.app/<key> -H "Content-Type: application/json" -d '{"title":"test","body":"ok"}'`）
-- [ ] 全量测试 **210/210 PASS**（既有点位 144 + 伊犁适配器 45 + 小时兜底 21）
+- [ ] 全量测试 **217/217 PASS**（既有点位 151 + 伊犁适配器 45 + 小时兜底 21）
 - [ ] `node tools/yili/cli.mjs stations` 返回 9 个监测点
 - [ ] 废气实时 17275 行按 4 页取全，`dt` 唯一
 - [ ] `--yili-only --dry-run --verbose` 能列出 5 个点，且 `1号2号机组/3号机组` 的 NOx/SO₂/颗粒物与企业端同小时一致
@@ -496,7 +497,8 @@ for %f in (buildtext marksv2 merge windows hourly-alarm watchdog pubfail backfil
 
 | 提交 | 内容 |
 |---|---|
-| 本次提交（2026-10-26） | 小时超标告警新增伊犁州平台兜底：5 对固定站点映射、N/C/D 有效性、折算/pH 区间、小时缓存、`--yili-only` 演练；新增 21 项回归测试 |
+| 本次提交（2026-10-26） | 小时告警增加数据有效负值异常：tier=`negative`，标题/分组改为「小时数据异常」；新增 7 项回归测试 |
+| 上一提交（2026-10-26） | 小时告警新增伊犁州平台兜底：5 对固定站点映射、N/C/D 有效性、折算/pH 区间、小时缓存、`--yili-only` 演练；新增 21 项回归测试 |
 | `d59c326` | 新增伊犁州平台采集分支：自动验证码、token 续期、9 点/四类数据、URL 分页完整性校验、JSON/CSV/XLSX；45 项适配器测试 |
 | 本地未提交（2026-10-25） | 维护期欠推自动补推；双层就绪门控；`not_ready` 保留队列；Node 24（本机/CI/`engines`）；新增 19 项补推回归 |
 | `ab807e2` | 修复 10-24 `say` 崩溃；企业端因子名兜底；Worker 失败每天告警；新增 pubfail 测试 |
@@ -525,6 +527,6 @@ for %f in (buildtext marksv2 merge windows hourly-alarm watchdog pubfail backfil
 - 关键约束：`pageNum/pageSize` 必须同时放 URL query；只放请求体会固定返回 10 行；
 - 凭据：`YILI_USERNAME/YILI_PASSWORD` 环境变量或 `tools/yili/local-config.json`；token 缓存 `tools/yili/runtime/token.json`，均不入库；
 - 测试：`node tools/yili-test.mjs`（45 项）、`node tools/yili-hourly-fallback-test.mjs`（21 项）；
-- 小时超标兜底：`config/yili-hourly-map.json` 固定 5 对站点；1#/2# 已用 2026-10-25 10 时逐值核实为“1号2号机组/3号机组”；
+- 小时数据异常/超标兜底：`config/yili-hourly-map.json` 固定 5 对站点；1#/2# 已用 2026-10-25 10 时逐值核实为“1号2号机组/3号机组”；
 - 兜底口径：仅 `N` 有效，废气优先 `zsValue`，pH 用 `metrics.min/max`，沿用企业端标准与去重键；公开平台无完整小时浓度序列，不参与该兜底判定；
 - 演练：`node tools/local-sync/hourly-alarm.cjs --date 2026-10-25 --hour 10 --dry-run --verbose --yili-only`。

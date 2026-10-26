@@ -1,13 +1,13 @@
-// hourly-alarm.cjs —— 小时超标自动告警（本机运行，企业端小时数据）
+// hourly-alarm.cjs —— 小时数据异常/超标自动告警（本机运行，企业端小时数据）
 //
-// 背景：平台只提供查询接口（无推送）。本脚本补上「轮询 → 阈值判定 → 推送」的最后一公里：
+// 背景：平台只提供查询接口（无推送）。本脚本补上「轮询 → 阈值/负值判定 → 推送」的最后一公里：
 //   1) 取企业端「小时行」（online-monitor/data/list，dateType=1），每行含各因子
 //      avg_value_<code>（实测）、outlet_standard_<code>（标准值）、flag_<code>（数据有效性）；
 //   2) 判定：见 lib/exceed.js（废气用折算值、废水用实测值；minRatio，requireValid）；
 //      标准值优先取 config/standards.json（_mode=override，用于绩效分级 A 级等更严口径），
 //      表中没有的因子才用平台 outlet_standard；
 //   3) 去重：KV `alarm:<date>:<hour>:<mp>:<code>`（TTL 3 天），同一小时同一因子只告警一次；
-//   4) 推送：Bark（一次运行合并一条）；无超标则不打扰；
+//   4) 推送：Bark（一次运行合并一条）；无异常/超标则不打扰；
 //   5) 状态：KV `last-hourly-alarm`（供排查）。
 //
 // 用法：
@@ -21,7 +21,7 @@ const fs = require('fs');
 const path = require('path');
 const { execFileSync } = require('child_process');
 const { createLogger } = require('./lib/log');
-const { judgeTiers, judgeRange, describeTier, parseStandard, num, cell } = require('./lib/exceed');
+const { judgeTiers, judgeRange, describeTier, formatPushValue, describePushTitle, parseStandard, num, cell } = require('./lib/exceed');
 const { createYiliHourlyFallback } = require('./lib/yili-hourly-fallback.cjs');
 
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
@@ -159,6 +159,7 @@ async function getMps(cookie) {
 
 // 因子清单：优先向企业端 /monitoritem/pollutant/list 取（权威：code↔名称↔单位），
 // 失败时退回默认编码表。2026-10-23 实测：非甲烷总烃=508、氨氮=060（此前误用 005/012）。
+const MAIN_FACTOR_CODES = new Set(['001', '002', '003', '011', '060', '508']);
 const DEFAULT_CODES = ['001', '002', '003', '011', '060', '508', 'B01', 'B02', 'S01', 'S02', 'S03', 'S04', 'S05', 'S06', 'S07', 'S08'];
 async function getPointFactors(cookie, mp) {
   try {
@@ -249,7 +250,7 @@ async function pushBark(title, body) {
   try {
     const r = await fetch(`https://api.day.app/${BARK}`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ title, body, level: 'timeSensitive', group: '小时超标' }),
+      body: JSON.stringify({ title, body, level: 'timeSensitive', group: '小时数据异常' }),
     });
     const j = JSON.parse(await r.text());
     return { ok: j && j.code === 200, resp: j };
@@ -357,7 +358,7 @@ async function pushBark(title, body) {
       const choice = standardChoice(mp.name, factor.code, isGas, factor.limit, '州平台');
       if (choice.stdA == null && choice.stdLegal == null) {
         if (!/^[SB]\d{2}$/i.test(factor.code)) missingStd.add(`${mp.name}/${factor.code}`);
-        continue;
+        if (!MAIN_FACTOR_CODES.has(factor.code)) continue;
       }
       addStandardPair(mp.name, factor.code, choice.stdA, choice.stdLegal);
       perCode[factor.code] = {
@@ -484,7 +485,7 @@ async function pushBark(title, body) {
           if (choice.stdA == null && choice.stdLegal == null) {
             // 工况参数（S0x/B0x）本身没有限值，不计入"缺标准"
             if (!/^[SB]\d{2}$/i.test(code)) missingStd.add(`${mp.name}/${code}`);
-            continue;
+            if (!MAIN_FACTOR_CODES.has(code)) continue;
           }
           addStandardPair(mp.name, code, choice.stdA, choice.stdLegal);
           perCode[code] = {
@@ -545,7 +546,8 @@ async function pushBark(title, body) {
   const all = [...hitByHour.entries()].flatMap(([hourKey, items]) => items.map((it) => ({ ...it, hourKey })));
   const nLegal = all.filter((x) => x.exceedLegal).length;
   const nA = all.filter((x) => x.exceedA && !x.exceedLegal).length;
-  log(`检索完成：数值因子 ${checkedFactors} 个，命中 ${all.length} 条（超排放标准 ${nLegal}，仅超A级 ${nA}）`);
+  const nNegative = all.filter((x) => x.negative).length;
+  log(`检索完成：数值因子 ${checkedFactors} 个，命中 ${all.length} 条（超排放标准 ${nLegal}，仅超A级 ${nA}，数据有效负值 ${nNegative}）`);
   if (stdPairs.size) log(`双层标准（A级更严）${stdPairs.size} 项：${[...stdPairs].join('；')}`);
   if (missingStd.size) log(`缺少标准值（无法判定）${missingStd.size} 项：${[...missingStd].slice(0, 20).join('、')}${missingStd.size > 20 ? ' …' : ''}（可在 config/standards.json 补充）`);
 
@@ -561,9 +563,9 @@ async function pushBark(title, body) {
   }
 
   if (!fresh.length) {
-    log('=== 完成（无新增超标）===');
+    log('=== 完成（无新增数据异常）===');
     if (!dryRun && CF.apiToken) {
-      try { await kvPut('last-hourly-alarm', JSON.stringify({ at: new Date().toISOString(), ok: true, checked: checkedFactors, exceeded: all.length, exceededLegal: nLegal, exceededA: nA, pushed: 0, missingStd: missingStd.size, missingSample: [...missingStd].slice(0, 20), sources: sourceStats, yiliFallback: !!yiliFallback })); } catch (e) { /* ignore */ }
+      try { await kvPut('last-hourly-alarm', JSON.stringify({ at: new Date().toISOString(), ok: true, checked: checkedFactors, exceeded: all.length, exceededLegal: nLegal, exceededA: nA, negative: nNegative, pushed: 0, missingStd: missingStd.size, missingSample: [...missingStd].slice(0, 20), sources: sourceStats, yiliFallback: !!yiliFallback })); } catch (e) { /* ignore */ }
     }
     process.exit(0);
   }
@@ -572,23 +574,18 @@ async function pushBark(title, body) {
   const maxItems = Number.isFinite(ALARM.maxItemsPerPush) ? ALARM.maxItemsPerPush : 10;
   const shown = fresh.slice(0, maxItems);
   const lines = shown.map((it) => {
-    if (it.range) return `· ${it.hourKey.slice(5)}时 ${it.mp} ${it.name} ${it.valueMin}~${it.valueMax}（${describeTier(it)}）`;
-    const val = Number(it.judged.toFixed(3));
-    const head = it.usedZs ? '折算 ' : '';
-    const extra = it.usedZs ? `（实测 ${Number(it.value.toFixed(3))}）` : '';
-    return `· ${it.hourKey.slice(5)}时 ${it.mp} ${it.name} ${head}${val}${extra}（${describeTier(it)}）`;
+    return `· ${it.hourKey.slice(5)}时 ${it.mp} ${it.name} ${formatPushValue(it)}（${describeTier(it)}）`;
   });
   if (fresh.length > shown.length) lines.push(`…另有 ${fresh.length - shown.length} 条未展示`);
   if (fresh.some((it) => it.source === 'yili')) {
     lines.push(`数据源：伊犁州平台${fresh.some((it) => it.source !== 'yili') ? '（部分点位兜底）' : '（企业端不可用兜底）'}`);
   }
   const body = lines.join('\n');
-  const anyLegal = fresh.some((it) => it.exceedLegal);
-  const title = `${anyLegal ? '⚠️ 小时超标' : '⚠️ A级预警'} ${fresh[0].hourKey.slice(0, 10)}`;
+  const title = `${describePushTitle(fresh)} ${fresh[0].hourKey.slice(0, 10)}`;
 
   for (const it of shown) {
-    const shownVal = it.range ? `${it.valueMin}~${it.valueMax}` : it.judged;
-    log(`EXCEED ${it.hourKey} ${it.mp} ${it.name}=${shownVal} A级=${it.stdA == null ? '-' : it.stdA} 排放=${it.stdLegal == null ? '-' : it.stdLegal} tier=${it.tier} flag=${it.flag} source=${it.source === 'yili' ? '州平台' : '企业端'}`);
+    const shownVal = it.range ? `${it.valueMin}~${it.valueMax}` : (it.negative ? formatPushValue(it) : it.judged);
+    log(`${it.negative ? 'ANOMALY' : 'EXCEED'} ${it.hourKey} ${it.mp} ${it.name}=${shownVal} A级=${it.stdA == null ? '-' : it.stdA} 排放=${it.stdLegal == null ? '-' : it.stdLegal} tier=${it.tier} flag=${it.flag} source=${it.source === 'yili' ? '州平台' : '企业端'}`);
   }
 
   if (dryRun) {
@@ -609,7 +606,7 @@ async function pushBark(title, body) {
       await kvPut('last-hourly-alarm', JSON.stringify({
         at: new Date().toISOString(), ok: r.ok, checked: checkedFactors,
         exceeded: all.length, exceededLegal: nLegal, exceededA: nA,
-        pushed: r.ok ? shown.length : 0, title,
+        pushed: r.ok ? shown.length : 0, title, negative: nNegative,
         missingStd: missingStd.size, missingSample: [...missingStd].slice(0, 20),
         sources: sourceStats, yiliFallback: !!yiliFallback,
       }));

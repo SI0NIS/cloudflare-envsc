@@ -10,8 +10,8 @@
 | `run_scf_local.cjs` | 主脚本：查 KV 是否已同步 → 确保 cookie 有效（无效则调 `auto-login`）→ 调 `tools/scf-marks-sync/index.js` 的 `main_handler` 抓取并写 KV → 失败发 Bark 告警（每天一次） |
 | `auto-login/auto-login.cjs` | 自动登录企业端：puppeteer-core + 本机 Chrome，滑块由 canvas 差值 + 合成 pointer 事件破解；校验通过后写 `runtime/cnemc-cookie.txt` |
 | `auto-login/debug-login.cjs` | 页面改版时调试用：导出输入框/按钮/滑块结构并截图 |
-| `hourly-alarm.cjs` | **小时超标告警**：每整点检查最近 2 个已完成小时，按「废气折算值 / 废水实测值」与标准值比较，超标推 Bark（去重） |
-| `lib/exceed.js` | 超标判定纯函数（可单测；`tools/hourly-alarm-test.mjs` 覆盖） |
+| `hourly-alarm.cjs` | **小时数据异常/超标告警**：每整点检查最近 2 个已完成小时，按「废气折算值 / 废水实测值」与标准值比较，超标或有效负值推 Bark（去重） |
+| `lib/exceed.js` | 数据异常/超标判定纯函数（可单测；`tools/hourly-alarm-test.mjs` 覆盖） |
 | `lib/yili-hourly-fallback.cjs` | 企业端小时数据不可用时的伊犁州平台兜底：显式站点映射、因子归一化、小时查询缓存（`tools/yili-hourly-fallback-test.mjs` 覆盖） |
 | `lib/log.js` | 共享日志（1MB 轮转） |
 | `local-config.example.json` | 配置模板，复制为 `local-config.json` 并填入密钥（**已被 gitignore**） |
@@ -37,7 +37,7 @@ node tools/local-sync/hourly-alarm.cjs --date 2026-10-22 --hour 11 --dry-run --v
 node tools/local-sync/hourly-alarm.cjs --date 2026-10-25 --hour 10 --dry-run --verbose --yili-only  # 强制州平台兜底演练
 ```
 
-## 小时超标告警
+## 小时数据异常/超标告警
 
 平台没有推送能力，只能查询。`hourly-alarm.cjs` 在本机补齐「轮询 → 判定 → 推送」：
 
@@ -46,13 +46,13 @@ node tools/local-sync/hourly-alarm.cjs --date 2026-10-25 --hour 10 --dry-run --v
 | 数据源 | 优先企业端 `online-monitor/data/list`（小时行：`avg_value_<code>` 实测、`outlet_standard_<code>` 标准、`flag_<code>` 有效性）+ `online-monitor/view/list`（`avg_zs[]` 折算序列）；因子清单取自 `/monitoritem/pollutant/list` |
 | 兜底 | 企业端 cookie/监测点/某点某小时取数失败时，按 `config/yili-hourly-map.json` 的固定站点 ID 改取伊犁州平台小时数据；正常时不访问州平台。`--yili-only` 可强制演练 |
 | 因子编码 | 动态获取（**非甲烷总烃=508**、颗粒物=001、二氧化硫=002、氮氧化物=003、化学需氧量=011、氨氮=060），避免编码猜错导致漏判 |
-| 判定口径 | **废气用折算值**（`avg_zs`，缺失时退回实测）；**废水（mpType=4）用实测值**（平台无折算）；仅 `flag=数据有效` 参与；严格大于标准 |
+| 判定口径 | **废气用折算值**（`avg_zs`，缺失时退回实测）；**废水（mpType=4）用实测值**（平台无折算）；仅 `flag=数据有效` 参与；严格大于标准；主监测因子为 `数据有效` 但数值 <0 时按异常负值推送 |
 | 两层标准 | `a` = 重污染天气绩效分级 A 级（颗粒物 10、非甲烷总烃 30）；`legal` = 排放标准（**配置值优先**，未配置的因子用平台 `outlet_standard`）。火电两机组 SO₂ 35、NOx 50（GB 13223-2011 超低排放口径）；总排口 pH 6~9、COD 50、氨氮 5（GB 21903-2008 表3 特别排放限值） |
-| 文案 | 仅超 A 级：`超A级标准 30，超 x%；未超排放标准 100`（标题「A级预警」）；两层均超：`超排放标准 100，超 x%；A级标准 30 亦超`（标题「小时超标」） |
+| 文案 | 仅超 A 级：`超A级标准 30，超 x%；未超排放标准 100`（标题「A级预警」）；两层均超：`超排放标准 100，超 x%；A级标准 30 亦超`（标题「小时数据异常」）；有效负值：`实测 -x，折算 -y（数据有效，异常负值）`（标题「小时数据异常」） |
 | 覆盖时段 | 默认最近 2 个已完成小时（数据晚到可在下一小时补上），也可 `--date/--hour` 指定 |
 | 去重 | KV `alarm:<日期>:<小时>:<监测点>:<因子>:<层级>`（TTL 3 天） |
-| 推送 | Bark，`group=小时超标`、`level=timeSensitive`；一次运行合并为一条 |
-| 状态 | KV `last-hourly-alarm`（checked/exceeded/exceededLegal/exceededA/pushed/missingStd/sources/yiliFallback） |
+| 推送 | Bark，`group=小时数据异常`、`level=timeSensitive`；一次运行合并为一条 |
+| 状态 | KV `last-hourly-alarm`（checked/exceeded/exceededLegal/exceededA/negative/pushed/missingStd/sources/yiliFallback） |
 | 配置 | `config/project.json` → `hourlyAlarm`：`enabled` / `compare=auto` / `minRatio` / `requireValid` / `maxItemsPerPush` |
 
 > 标准表查找顺序：监测点名 → `_gas`（废气通用）→ `*`；`ENVSC_STANDARDS_FILE` 可指定临时表用于演练。
@@ -83,7 +83,7 @@ node tools/local-sync/hourly-alarm.cjs --date 2026-10-25 --hour 10 --dry-run --v
 - 因子按名称映射到企业端编码：pH/氨氮/COD 为 `001/060/011`；颗粒物/SO₂/NOx/非甲烷总烃为 `001/002/003/508`。废气优先用州平台 `zsValue`，缺失退回实测；pH 用州平台 `metrics.min/max` 做区间判定。
 - 州平台数据标记仅 `N` 映射为「数据有效」；实测见过的 `C`、`D`、空值均不参与判定。若后续确认 `C` 的语义，应先在映射层显式调整并补测试。
 - 去重键不区分数据源，仍为 `alarm:<date>:<hour>:<mp>:<code>:<tier>`；企业端恢复后不会重复推送同一小时同一层级。
-- 公开平台提供有效传输率和失效原因，但不提供可直接做小时浓度阈值判定的完整序列，因此小时超标链路为「企业端 → 伊犁州平台」。
+- 公开平台提供有效传输率和失效原因，但不提供可直接做小时浓度阈值判定的完整序列，因此小时数据异常/超标链路为「企业端 → 伊犁州平台」。
 
 ### Windows 计划任务（每小时 :20）
 

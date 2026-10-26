@@ -115,7 +115,7 @@ cloudflare-envsc/
 
 ## 伊犁州平台数据采集适配器
 
-`tools/yili/` 提供州平台采集适配器，支持自动验证码登录、9 个监测点、实时/分钟/小时/日数据、5000 条分页完整性校验及 JSON/CSV/XLSX 输出。小时超标告警在企业端不可用时会按固定映射自动改取州平台数据；日报链路保持不变。凭据与 token 只落在本地忽略目录，不进入仓库。
+`tools/yili/` 提供州平台采集适配器，支持自动验证码登录、9 个监测点、实时/分钟/小时/日数据、5000 条分页完整性校验及 JSON/CSV/XLSX 输出。小时数据异常/超标告警在企业端不可用时会按固定映射自动改取州平台数据；日报链路保持不变。凭据与 token 只落在本地忽略目录，不进入仓库。
 
 ```powershell
 node tools/yili/cli.mjs stations
@@ -248,7 +248,7 @@ npx wrangler tail                            # 观察定时执行的实时日志
 - 推送成功写 KV 去重键，当天不会重复打扰；全达标（仅标题）同样写去重。
 - 维护/失败日期进入欠推队列；平台恢复后先推 D-1，再用单次剩余配额从旧到新补推，补完清空队列。
 
-## 小时超标告警（2026-10-23 新增）
+## 小时数据异常/超标告警（2026-10-23 新增）
 
 平台只提供查询接口、没有推送能力。本机脚本补齐「轮询 → 阈值判定 → 推送」：
 
@@ -259,12 +259,12 @@ npx wrangler tail                            # 观察定时执行的实时日志
 | 数据源 | 优先企业端 `online-monitor/data/list`（小时行的实测值/标准值/有效性）+ `online-monitor/view/list`（折算值序列）；因子清单取自 `/monitoritem/pollutant/list` |
 | 兜底 | 企业端 cookie/监测点/某点某小时不可用时，按 `config/yili-hourly-map.json` 改取伊犁州平台小时数据；正常时不访问州平台，去重键不变 |
 | 因子编码 | 由企业端接口动态获取（**非甲烷总烃=508、颗粒物=001、二氧化硫=002、氮氧化物=003、化学需氧量=011、氨氮=060**），不再硬编码猜测 |
-| 判定口径 | **废气用折算值**、**废水用实测值**（废水无折算）；废水 pH 用 `min_value`/`max_value` 区间判定；仅「数据有效」参与；严格大于标准（`minRatio` 可调） |
+| 判定口径 | **废气用折算值**、**废水用实测值**（废水无折算）；废水 pH 用 `min_value`/`max_value` 区间判定；仅「数据有效」参与；严格大于标准（`minRatio` 可调）；主监测因子为「数据有效」但数值为负时按异常负值推送 |
 | 两层标准 | **A 级绩效**（`config/standards.json` → `a`）与**排放标准**（配置值优先，未配置时用平台 `outlet_standard`）。A 级：颗粒物 **10**、非甲烷总烃 **30**；排放标准：3号机组/1号2号机组 SO₂ **35**、NOx **50**（GB 13223-2011 超低排放口径），颗粒物 30、非甲烷总烃 100；总排口 pH **6~9**、COD **50**、氨氮 **5**（GB 21903-2008 表3 特别排放限值） |
-| 文案区分 | 仅超 A 级 → `超A级标准 30，超 x%；未超排放标准 100`（标题「A级预警」）；两层均超 → `超排放标准 100，超 x%；A级标准 30 亦超`（标题「小时超标」） |
+| 文案区分 | 仅超 A 级 → `超A级标准 30，超 x%；未超排放标准 100`（标题「A级预警」）；两层均超 → `超排放标准 100，超 x%；A级标准 30 亦超`（标题「小时数据异常」）；数据有效负值 → `实测 -x，折算 -y（数据有效，异常负值）`（标题「小时数据异常」） |
 | 去重 | KV `alarm:<日期>:<小时>:<监测点>:<因子>:<层级>`（TTL 3 天）；A 级预警升级为排放超标时会再推一次 |
-| 推送 | Bark（`group=小时超标`，`level=timeSensitive`），一次运行合并一条 |
-| 状态 | KV `last-hourly-alarm`（checked / exceeded / exceededLegal / exceededA / pushed / missingStd / sources） |
+| 推送 | Bark（`group=小时数据异常`，`level=timeSensitive`），一次运行合并一条 |
+| 状态 | KV `last-hourly-alarm`（checked / exceeded / exceededLegal / exceededA / negative / pushed / missingStd / sources） |
 | 配置 | `config/project.json` → `hourlyAlarm`；两层限值 → `config/standards.json` |
 
 手动演练：
@@ -276,7 +276,7 @@ node tools/local-sync/hourly-alarm.cjs --date 2026-10-25 --hour 10 --dry-run --v
 
 > 页面列与接口字段的对照（标干值=`avg_value_<code>`、标准值=`outlet_standard_<code>`，
 > 以及“非甲烷总烃=508”的核实过程）见 [tools/local-sync/README.md](tools/local-sync/README.md#字段与页面核对2026-10-23)。
-> 公开平台没有可直接进行小时浓度阈值判定的完整序列；小时超标兜底顺序为企业端 → 伊犁州平台。
+> 公开平台没有可直接进行小时浓度阈值判定的完整序列；小时数据异常/超标兜底顺序为企业端 → 伊犁州平台。
 
 ## 本地开发与测试
 

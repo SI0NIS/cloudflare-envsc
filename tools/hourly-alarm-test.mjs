@@ -1,9 +1,9 @@
-// 小时超标判定单测（2026-10-23 落地）
-// 覆盖：正常/超标、数据有效性过滤、标准值缺失、氧含量折算、max 模式、阈值倍数、evalRow 汇总。
+// 小时数据异常判定单测（2026-10-23 落地，2026-10-26 增加有效负值）
+// 覆盖：正常/超标、数据有效性过滤、标准值缺失、氧含量折算、max 模式、阈值倍数、evalRow 汇总、异常负值。
 // 运行：node tools/hourly-alarm-test.mjs
 import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
-const { evalFactor, evalRow, judgePoint, judgeTiers, judgeRange, describeTier } = require('./local-sync/lib/exceed.js');
+const { evalFactor, evalRow, judgePoint, judgeTiers, judgeRange, describeTier, formatPushValue, describePushTitle } = require('./local-sync/lib/exceed.js');
 
 const results = [];
 function check(name, cond, detail) {
@@ -213,6 +213,55 @@ const opts = { compare: 'avg_value', minRatio: 1, requireValid: true, o2Code: 'S
 {
   const r = judgeTiers(40, 40, null, 35, '数据有效', { useZs: true, minRatio: 1, requireValid: true });
   check('㉝ SO2 40 / 排放35 → 超标', r && r.exceedLegal && r.tier === 'legal', JSON.stringify(r));
+}
+
+// ㉞ 数据有效负值：即使低于标准也按数据异常推送
+{
+  const r = judgeTiers(-1.234, -1.512, 10, 30, '数据有效', { useZs: true, minRatio: 1, requireValid: true });
+  check('㉞ 数据有效负值 → 异常，tier=negative',
+    r && r.negative && r.exceeded && r.tier === 'negative' && !r.exceedA && !r.exceedLegal
+    && r.ratioA === null && r.ratioLegal === null && /异常负值/.test(describeTier(r)),
+    JSON.stringify(r));
+}
+// ㉟ 实测为负、折算为正，也不能被折算值掩盖负值异常
+{
+  const r = judgeTiers(-1, 2, 10, 30, '数据有效', { useZs: true, minRatio: 1, requireValid: true });
+  check('㉟ 实测负值/折算正 → 仍判异常', r && r.negative && r.exceeded && !r.exceedLegal, JSON.stringify(r));
+}
+// ㊱ 无效数据中的负值不告警
+{
+  const r = judgeTiers(-1, -1, 10, 30, '--', { useZs: true, minRatio: 1, requireValid: true });
+  check('㊱ flag=-- 负值 → 不判异常', r && !r.negative && !r.exceeded, JSON.stringify(r));
+}
+// ㊲ pH 区间数据出现负值 → 异常
+{
+  const r = judgeRange(-0.1, 7.2, null, '6-9', '数据有效', { requireValid: true });
+  check('㊲ pH 区间负值 → 异常', r && r.negative && r.exceeded && r.tier === 'negative' && !r.exceedLegal, JSON.stringify(r));
+}
+// ㊳ 推送标题：排放超标或负值统一为小时数据异常
+{
+  const negative = { negative: true, exceedLegal: false };
+  const legal = { negative: false, exceedLegal: true };
+  const aOnly = { negative: false, exceedLegal: false };
+  check('㊳ 负值/排放超标标题为小时数据异常，仅A级保留A级预警',
+    describePushTitle([negative]) === '⚠️ 小时数据异常'
+    && describePushTitle([legal]) === '⚠️ 小时数据异常'
+    && describePushTitle([aOnly]) === '⚠️ A级预警',
+    JSON.stringify({ negative: describePushTitle([negative]), legal: describePushTitle([legal]), aOnly: describePushTitle([aOnly]) }));
+}
+// ㊴ 推送数值格式：负值显示实测/折算，正常废气仍显示折算（实测）
+{
+  const negative = formatPushValue({ negative: true, range: false, value: -1.234, zs: -1.512, usedZs: true, judged: -1.512 });
+  const normal = formatPushValue({ negative: false, range: false, value: 38.01, zs: 32.54, usedZs: true, judged: 32.54 });
+  check('㊴ 推送数值格式', negative === '实测 -1.234，折算 -1.512' && normal === '折算 32.54（实测 38.01）', JSON.stringify({ negative, normal }));
+}
+// ㊵ 无标准值时，主因子负值仍可作为数据异常（标准比较不可用不应吞掉负值）
+{
+  const scalar = judgeTiers(-1, -1, null, null, '数据有效', { useZs: true, minRatio: 1, requireValid: true });
+  const range = judgeRange(-0.1, 7.2, null, null, '数据有效', { requireValid: true });
+  check('㊵ 无标准值负值 → 仍判异常',
+    scalar && scalar.negative && scalar.exceeded && range && range.negative && range.exceeded,
+    JSON.stringify({ scalar, range }));
 }
 
 const failed = results.filter((r) => !r.pass);
