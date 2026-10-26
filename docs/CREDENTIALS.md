@@ -24,6 +24,16 @@ KV 命名空间 id、账号 id 为非敏感，在 `wrangler.toml` 与 `local-con
 | `cloudflare.accountId / kvNamespaceId / apiToken` | `local-config.json` | 本机读写 KV | apiToken 在 CF 后台重置后更新 |
 | `bark.key` | `local-config.json` | 同步失败告警 | 与 §1 的 BARK_KEY 保持一致 |
 
+### 2.1 伊犁州平台（数据采集适配器）
+
+| 凭据 | 位置 | 用途 | 轮换方法 |
+|---|---|---|---|
+| 伊犁平台账号 `YILI_USERNAME` / 密码 `YILI_PASSWORD` | `tools/yili/local-config.json`（gitignore）或进程环境变量 | 自动登录州平台 | 改密码后更新本地配置；不要把真实值写入示例、日志或提交 |
+| 伊犁平台 token `YILI_TOKEN` | 环境变量临时覆盖，或 `tools/yili/runtime/token.json`（gitignore） | 复用州平台会话 | 失效后适配器自动重登；也可删除 `runtime/token.json` 强制刷新 |
+| 验证码模型 | `tools/yili/captcha-model.json` | 四位算术验证码识别 | 非密钥；平台验证码样式变化时需重新采样训练，样本图片不入库 |
+
+州平台证书链当前无法通过 Node 默认校验，适配器使用 `verifyTls=false` 绕过校验。只能在受控网络使用；平台修复证书后应设 `verifyTls=true`。`runtime/captcha.json` 保存 5 分钟有效的验证码 UUID，也属于本地临时数据，不入库。
+
 ## 3. GitHub 侧（同步通道）
 
 | 凭据 | 位置 | 用途 | 轮换方法 |

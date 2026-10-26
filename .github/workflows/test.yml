@@ -18,6 +18,12 @@ jobs:
           node --check src/index.js
           node --check tools/scf-marks-sync/index.js
           node --check tools/local-sync/run_scf_local.cjs
+          node --check tools/yili/cli.mjs
+          node --check tools/yili/lib/captcha.mjs
+          node --check tools/yili/lib/client.mjs
+          node --check tools/yili/lib/config.mjs
+          node --check tools/yili/lib/errors.mjs
+          node --check tools/yili/lib/http.mjs
 
       - name: 推送文案规则（buildText）
         run: node tools/buildtext-test.mjs
@@ -42,3 +48,6 @@ jobs:
 
       - name: 维护期欠推日报自动补推
         run: node tools/backfill-test.mjs
+
+      - name: 伊犁州平台采集适配器
+        run: node tools/yili-test.mjs

@@ -28,3 +28,8 @@ tools/_dm_cookie*_
 tools/local-sync/local-config.json
 tools/local-sync/runtime/
 tools/local-sync/auto-login/node_modules/
+
+# 伊犁州平台适配器：本地凭据、令牌缓存与导出临时文件不入库
+tools/yili/local-config.json
+tools/yili/runtime/
+tools/yili/exports/

@@ -99,6 +99,7 @@ cloudflare-envsc/
 ├── tools/
 │   ├── scf-marks-sync/     # 标记同步核心（云函数/本机共用同一份代码）
 │   ├── local-sync/         # 本机兜底同步：定时入口 + 企业端自动登录续期 + 日志
+│   ├── yili/               # 伊犁州平台采集适配器：登录、测点、因子、四类原始数据
 │   ├── push-now.mjs        # 本地补推某一天（读取 KV 快照）
 │   ├── kv-read.py          # 读取/检查 KV 内容
 │   ├── buildtext-test.mjs  # 推送文案回归测试（27 例）
@@ -109,6 +110,17 @@ cloudflare-envsc/
 ├── relay/                  # 企业端 HTTP → HTTPS 中继（fly.io/Render/Docker，带鉴权，可选）
 └── docs/                   # 上游接口说明文档
 ```
+
+## 伊犁州平台数据采集适配器
+
+`tools/yili/` 是独立于日报推送链路的州平台采集分支，支持自动验证码登录、9 个监测点、实时/分钟/小时/日数据、5000 条分页完整性校验及 JSON/CSV/XLSX 输出。凭据与 token 只落在本地忽略目录，不进入仓库。
+
+```powershell
+node tools/yili/cli.mjs stations
+node tools/yili/cli.mjs query --station 川宁生物废水总排口 --type hour --date 2026-10-25
+```
+
+完整用法见 [tools/yili/README.md](tools/yili/README.md)。
 
 ## 部署步骤
 

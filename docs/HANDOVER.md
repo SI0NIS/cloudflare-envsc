@@ -1,6 +1,6 @@
 # ENVSC 有效传输率核查系统 · 交接文档
 
-> 版本：2026-10-25
+> 版本：2026-10-26
 > 代码仓库：<https://github.com/SI0NIS/cloudflare-envsc>
 > 本机部署目录：`D:\Application\cloudflare-envsc`
 > 适用对象：接手本项目的开发/运维人员，或另一个 AI 客户端
@@ -211,7 +211,12 @@ cloudflare-envsc/
 │   │   ├── local-config.json     # 密钥（gitignore）
 │   │   └── runtime/              # cookie、日志、factor-names.json（gitignore）
 │   ├── push-now.mjs              # 手动生成/补推某天日报
-│   ├── *-test.mjs                # 7 套回归测试
+│   ├── yili/                     # 伊犁州平台采集适配器（独立分支，不影响 Worker）
+│   │   ├── cli.mjs               # stations/factors/query/captcha/export/auth
+│   │   ├── lib/{client,captcha,config,http,errors}.mjs
+│   │   ├── captcha-model.json    # 200 原型验证码模型
+│   │   └── runtime/              # token、验证码临时文件（gitignore）
+│   ├── *-test.mjs                # 9 套回归测试（含 yili-test.mjs）
 │   └── dump-*.mjs / kv-read.py   # 诊断脚本
 ├── docs/{CREDENTIALS.md, HANDOVER.md}
 ├── .github/workflows/test.yml    # CI：push/PR 跑全部测试
@@ -472,7 +477,9 @@ for %f in (buildtext marksv2 merge windows hourly-alarm watchdog pubfail backfil
 - [ ] `hourly-alarm.cjs --dry-run --verbose` 能列出 5 个点的数值因子，`missingStd=0`
 - [ ] 三个计划任务状态 `Ready`，NextRun 分别为 14:40 / 登录时 / 每小时 :20
 - [ ] Bark 测试消息能收到（`curl -X POST https://api.day.app/<key> -H "Content-Type: application/json" -d '{"title":"test","body":"ok"}'`）
-- [ ] 全量测试 **144/144 PASS**
+- [ ] 全量测试 **189/189 PASS**（既有点位 144 + 伊犁适配器 45）
+- [ ] `node tools/yili/cli.mjs stations` 返回 9 个监测点
+- [ ] 废气实时 17275 行按 4 页取全，`dt` 唯一
 - [ ] `last-result.backfill.pendingDates` 与 KV 实际缺失日期一致，恢复后自动清空
 - [ ] Worker 定时为 `0 7-12 * * *`，`last-result` 可读
 - [ ] 仓库 `main` 与本地树一致（或已知差异）
@@ -483,6 +490,7 @@ for %f in (buildtext marksv2 merge windows hourly-alarm watchdog pubfail backfil
 
 | 提交 | 内容 |
 |---|---|
+| 本次提交（2026-10-26） | 新增伊犁州平台采集分支：自动验证码、token 续期、9 点/四类数据、URL 分页完整性校验、JSON/CSV/XLSX；新增 45 项适配器测试 |
 | 本地未提交（2026-10-25） | 维护期欠推自动补推；双层就绪门控；`not_ready` 保留队列；Node 24（本机/CI/`engines`）；新增 19 项补推回归 |
 | `ab807e2` | 修复 10-24 `say` 崩溃；企业端因子名兜底；Worker 失败每天告警；新增 pubfail 测试 |
 | `673ee46` | 废水因子接入（mpType=1）；pH 区间判定；火电 SO₂ 35/NOx 50；总排口 COD 50/氨氮 5 |
@@ -499,3 +507,14 @@ for %f in (buildtext marksv2 merge windows hourly-alarm watchdog pubfail backfil
 - 企业端账号/权限：找平台管理员（账号与密码见 `tools/local-sync/local-config.json`，勿外传）；
 - 公开平台维护：关注 `https://www.envsc.cn/ErrPage/24yearcslError.html` 是否恢复；
 - 紧急停用推送：暂停 `ENVSC-SCF-Local-Sync` / `ENVSC-Hourly-Alarm` 两个计划任务，或在 `local-config.json` 清空 `bark.key`。
+
+---
+
+## 15. 伊犁州平台适配器（2026-10-26 新增）
+
+- 入口：`node tools/yili/cli.mjs`；说明见 `tools/yili/README.md`；
+- 分支：GitHub `伊犁州生态环境数字化监控平台`；
+- 已验证：自动登录、9 个监测点、四类数据；废气实时 17275 行按 4 页取全且时间唯一；
+- 关键约束：`pageNum/pageSize` 必须同时放 URL query；只放请求体会固定返回 10 行；
+- 凭据：`YILI_USERNAME/YILI_PASSWORD` 环境变量或 `tools/yili/local-config.json`；token 缓存 `tools/yili/runtime/token.json`，均不入库；
+- 测试：`node tools/yili-test.mjs`（45 项）。
