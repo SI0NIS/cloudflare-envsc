@@ -1,7 +1,9 @@
-# local-sync —— 本机执行标记同步（云函数不可用时的兜底）
+# local-sync —— 本机标记同步与小时数据告警
 
-云函数（腾讯云 SCF / 阿里云 FC）不可用或欠费时，由本机计划任务在**每天 14:40** 完成：
-「校验/续期企业端 cookie → 抓取 D-1 标记 → 写入 Cloudflare KV」，供 15:00 的日报推送使用。
+云函数（腾讯云 SCF / 阿里云 FC）已停用，当前主方案由本机计划任务执行：
+
+- **每天 14:40**：「校验/续期企业端 cookie → 抓取 D-1 标记 → 写入 Cloudflare KV」，供 15:00 的日报推送使用；
+- **每小时 :20**：检查最近两个已完成小时，发现超标或数据异常时推送 Bark。
 
 ## 组成
 
@@ -20,16 +22,21 @@
 
 ## 安装
 
-```bash
-cd tools/local-sync/auto-login
+前置要求：**Node.js ≥ 24**（含 npm）。
+
+```powershell
+Set-Location "<仓库路径>"
+npm ci
+Set-Location tools\local-sync\auto-login
 npm install puppeteer-core --registry=https://registry.npmmirror.com
-cp ../local-config.example.json ../local-config.json   # 填入账号/密码/CF 凭据/Bark key
+Copy-Item ..\local-config.example.json ..\local-config.json   # 填入账号/密码/CF 凭据/Bark key
 ```
 
 ## 手动运行
 
 ```bash
 node tools/local-sync/run_scf_local.cjs --quick                 # 只同步 D-1（定时任务用，约 30-40 秒）
+node tools/local-sync/run_scf_local.cjs --if-missing            # 登录补跑：已有 marks:<日期> 即跳过，不覆盖正式档
 node tools/local-sync/run_scf_local.cjs 2026-10-20 2 --force    # 指定日期与天数，忽略"今日已同步"检查
 node tools/local-sync/auto-login/auto-login.cjs                 # 仅刷新 cookie
 node tools/local-sync/hourly-alarm.cjs                          # 小时告警（最近 2 个已完成小时）
@@ -98,7 +105,7 @@ $set     = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit 
 Register-ScheduledTask -TaskName "ENVSC-Hourly-Alarm" -Action $action -Trigger $trigger -Settings $set -Force
 ```
 
-## Windows 计划任务（每天 14:40）
+## Windows 计划任务（每天 14:40 + 登录时补缺）
 
 ```powershell
 $action  = New-ScheduledTaskAction -Execute "<node.exe 绝对路径>" `
@@ -108,13 +115,21 @@ $trigger = New-ScheduledTaskTrigger -Daily -At "14:40"
 $set     = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 15) `
            -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
 Register-ScheduledTask -TaskName "ENVSC-SCF-Local-Sync" -Action $action -Trigger $trigger -Settings $set -Force
+
+$action2  = New-ScheduledTaskAction -Execute "<node.exe 绝对路径>" `
+            -Argument '"<仓库路径>\tools\local-sync\run_scf_local.cjs" --if-missing' `
+            -WorkingDirectory "<仓库路径>"
+$trigger2 = New-ScheduledTaskTrigger -AtLogOn
+Register-ScheduledTask -TaskName "ENVSC-SCF-Local-Sync-Logon" -Action $action2 -Trigger $trigger2 -Settings $set -Force
 ```
+
+`--quick` 是每天 14:40 的正式档：按载荷完备性判断，数据不全会补抓；`--if-missing` 是登录补跑档：只要 `marks:<日期>` 已存在就跳过，不覆盖正式档结果。
 
 ## 说明与注意
 
 - **幂等**：先读 KV `marks:<日期>.at`，若已是今天则跳过，避免与云端重复抓取；
 - **cookie 续期**：`auto-login` 只在 cookie 失效时触发（约 7~8 天一次），每次耗时约 40 秒；
 - **失败告警**：同步或续期失败会发 Bark（每天最多一条），不会静默；
-- 本机需开机；若 14:40 未开机，任务会在开机后补跑（可能晚于 15:00 推送）；
+- 本机需开机；若 14:40 未开机，日常任务会在开机后补跑，登录任务也会以 `--if-missing` 只补缺口（可能晚于 15:00 推送）；
 - 企业端改版可能导致自动登录失效：先跑 `auto-login/debug-login.cjs` 看页面结构，再调整选择器；
 - 账号密码只存在于 `local-config.json`（本机），不要提交到仓库。

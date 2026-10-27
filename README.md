@@ -6,6 +6,8 @@
 
 本项目把这个过程完全自动化：**每天定时核查有效传输率，一旦出现异常监控点或异常标记，立即推送到手机（Bark / 邮件）**——不用登录任何平台，打开通知就知道当天哪些排口/机组出过什么事、发生在几点几分。
 
+此外，本机脚本每小时检查最近两个已完成小时的数据：小时值超过 A 级/排放标准，或主监测因子在「数据有效」时出现负值，都会发送「小时数据异常/超标」告警；企业端不可用时自动改取伊犁州平台数据。
+
 > 接手或迁移到新机器，请先读 **[docs/HANDOVER.md](docs/HANDOVER.md)**（架构、部署步骤、配置、运维命令、故障排查、验收清单）。
 
 ## 推送效果
@@ -34,7 +36,16 @@
 · 3号机组（工况标记：停运，不计入有效传输率统计时段）
 ```
 
-**④ 标记同步云函数 cookie 失效时，单独 Bark 告警**（当天只告警一次），提醒更新会话。
+**④ 本机标记同步 cookie 失效时，单独 Bark 告警**（当天只告警一次），提醒更新会话。
+
+**⑤ 小时数据异常（独立 Bark，每小时检查）：**
+
+```
+⚠️ 小时数据异常 2026-10-25
+· 10-25 10时 3号机组 氮氧化物 实测 -1.234，折算 -1.512（数据有效，异常负值）
+```
+
+同一小时的多条异常会合并为一条；若数据来自州平台兜底，正文会注明「数据源：伊犁州平台」。
 
 推送通道：**Bark 为主**（iOS 免费 App，公网 HTTPS）；**邮件兜底**（Resend HTTP API，Bark 失败时自动补发，不配置则只发 Bark）。
 
@@ -92,22 +103,41 @@
 
 ```
 cloudflare-envsc/
+├── .github/workflows/test.yml # CI：Node.js 24、语法检查与完整测试集
 ├── config/
 │   ├── project.json        # 业务配置（唯一事实来源）：排除点/公司名/阈值/推送窗口
+│   ├── standards.json      # 小时告警两层限值：A 级绩效 + 排放标准
 │   └── yili-hourly-map.json # 企业端小时点 ↔ 伊犁州平台固定站点映射
-├── src/index.js            # Worker 主程序：取数、判定、文案、推送、看门狗
+├── src/
+│   ├── index.js            # Worker 编排入口：取数、多源标记融合、补推、看门狗
+│   ├── config.js           # 读取并校验 config/project.json
+│   ├── core/
+│   │   ├── judge.js        # 有效传输率判定：异常点、废水豁免、停运排除
+│   │   ├── marks.js        # 标记 v2 序列化、区间覆盖与标样核查豁免
+│   │   ├── text.js         # 推送文案组装（buildText）
+│   │   └── time.js         # UTC+8 日期与 D-1 工具
+│   └── io/
+│       ├── enterprise.js   # 企业端分钟级标记取数（中继/直连）
+│       ├── kv.js           # KV 标记读取与 v1/v2 兼容
+│       ├── public.js       # 公开平台有效传输率与小时级标记
+│       └── push.js         # Bark 主通道 + 邮件兜底
 ├── wrangler.toml           # Worker 配置：cron、vars、KV 绑定
 ├── tools/
 │   ├── scf-marks-sync/     # 标记同步核心（云函数/本机共用同一份代码）
-│   ├── local-sync/         # 本机兜底同步：定时入口 + 企业端自动登录续期 + 日志
+│   ├── local-sync/         # 本机主同步、自动登录、小时告警与州平台兜底
 │   ├── yili/               # 伊犁州平台采集适配器：登录、测点、因子、四类原始数据
 │   ├── push-now.mjs        # 本地补推某一天（读取 KV 快照）
 │   ├── kv-read.py          # 读取/检查 KV 内容
-│   ├── buildtext-test.mjs  # 推送文案回归测试（27 例）
-│   ├── merge-test.mjs      # 标记合并回归测试（28 例）
-│   ├── backfill-test.mjs   # 维护期欠推补推回归测试（19 例）
-│   ├── yili-hourly-fallback-test.mjs # 州平台小时兜底回归测试（21 例）
-│   ├── watchdog-test.mjs   # 看门狗回归测试
+│   ├── buildtext-test.mjs  # 推送文案（27 例）
+│   ├── marksv2-test.mjs    # 标记 v2 结构化契约（15 例）
+│   ├── merge-test.mjs      # 标记合并（28 例）
+│   ├── windows-test.mjs    # 标记窗口提取/合并（9 例）
+│   ├── hourly-alarm-test.mjs # 小时异常/超标判定与文案（41 例）
+│   ├── yili-hourly-fallback-test.mjs # 州平台小时兜底（21 例）
+│   ├── watchdog-test.mjs   # 看门狗（8 例）
+│   ├── pubfail-test.mjs    # 公开平台故障告警与幂等（4 例）
+│   ├── backfill-test.mjs   # 维护期欠推补推（19 例）
+│   ├── yili-test.mjs       # 州平台采集适配器（45 例）
 │   └── dump-*.mjs          # 各数据接口裸抓诊断脚本
 ├── relay/                  # 企业端 HTTP → HTTPS 中继（fly.io/Render/Docker，带鉴权，可选）
 └── docs/                   # 上游接口说明文档
@@ -115,9 +145,18 @@ cloudflare-envsc/
 
 ## 伊犁州平台数据采集适配器
 
-`tools/yili/` 提供州平台采集适配器，支持自动验证码登录、9 个监测点、实时/分钟/小时/日数据、5000 条分页完整性校验及 JSON/CSV/XLSX 输出。小时数据异常/超标告警在企业端不可用时会按固定映射自动改取州平台数据；日报链路保持不变。凭据与 token 只落在本地忽略目录，不进入仓库。
+`tools/yili/` 提供州平台采集适配器，已实现：
+
+- 自动识别四位算术图形验证码，登录包装、token 缓存、过期重登；
+- 9 个监测点与因子清单查询，实时/分钟/小时/日四类原始数据；
+- `pageSize` 上限 5000 的分页取全，并校验每页行数、总行数和 `dt` 唯一性；
+- JSON/CSV/XLSX 输出与平台原生 XLSX 导出；
+- 小时数据异常/超标告警的州平台兜底：按固定站点 ID 映射，只把州平台 `N` 视为「数据有效」，正常时不访问州平台。
+
+凭据、token 和导出文件只落在本地忽略目录，不进入仓库；平台证书异常时示例配置使用 `verifyTls=false`，仅应在受控网络启用。
 
 ```powershell
+node tools/yili/cli.mjs auth
 node tools/yili/cli.mjs stations
 node tools/yili/cli.mjs query --station 川宁生物废水总排口 --type hour --date 2026-10-25
 ```
@@ -264,7 +303,7 @@ npx wrangler tail                            # 观察定时执行的实时日志
 | 文案区分 | 仅超 A 级 → `超A级标准 30，超 x%；未超排放标准 100`（标题「A级预警」）；两层均超 → `超排放标准 100，超 x%；A级标准 30 亦超`（标题「小时数据异常」）；数据有效负值 → `实测 -x，折算 -y（数据有效，异常负值）`（标题「小时数据异常」） |
 | 去重 | KV `alarm:<日期>:<小时>:<监测点>:<因子>:<层级>`（TTL 3 天）；A 级预警升级为排放超标时会再推一次 |
 | 推送 | Bark（`group=小时数据异常`，`level=timeSensitive`），一次运行合并一条 |
-| 状态 | KV `last-hourly-alarm`（checked / exceeded / exceededLegal / exceededA / negative / pushed / missingStd / sources） |
+| 状态 | KV `last-hourly-alarm`（checked / exceeded / exceededLegal / exceededA / negative / pushed / missingStd / sources / yiliFallback） |
 | 配置 | `config/project.json` → `hourlyAlarm`；两层限值 → `config/standards.json` |
 
 手动演练：
@@ -283,11 +322,20 @@ node tools/local-sync/hourly-alarm.cjs --date 2026-10-25 --hour 10 --dry-run --v
 ```bash
 npm run dev                        # 本地起 Worker（wrangler dev）
 node tools/buildtext-test.mjs      # 推送文案规则 27 例
+node tools/marksv2-test.mjs        # 标记 v2 结构化契约 15 例
 node tools/merge-test.mjs          # 标记合并规则 28 例
-node tools/backfill-test.mjs       # 欠推登记/双层就绪门控/恢复补推/限流/去重 19 例
-node tools/watchdog-test.mjs       # 看门狗逻辑
+node tools/windows-test.mjs        # 标记窗口提取/合并 9 例
+node tools/hourly-alarm-test.mjs   # 小时异常/超标判定与文案 41 例
 node tools/yili-hourly-fallback-test.mjs # 州平台站点/因子映射与小时兜底 21 例
+node tools/watchdog-test.mjs       # 看门狗逻辑 8 例
+node tools/pubfail-test.mjs        # 公开平台故障告警与幂等 4 例
+node tools/backfill-test.mjs       # 欠推登记/双层就绪门控/恢复补推/限流/去重 19 例
+node tools/yili-test.mjs           # 州平台登录/分页/字段/重登 45 例
+
+# 合计 217 例；CI 在 Node.js 24 上运行同一批测试
 ```
+
+`.github/workflows/test.yml` 在 push / pull_request 时使用 **Node.js 24** 安装依赖、执行语法检查并跑完上述 10 组测试。
 
 运维常用：
 

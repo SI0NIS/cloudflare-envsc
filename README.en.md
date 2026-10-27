@@ -6,6 +6,8 @@ The **effective transmission rate** of enterprise pollution-source automatic mon
 
 This project fully automates that routine: **it checks the transmission rate on schedule every day, and the moment any abnormal monitoring point or anomaly mark shows up, it pushes straight to your phone (Bark / email)** — no need to log in to any platform; the notification alone tells you which stack/outlet had an issue, what kind, and at exactly what time.
 
+It also checks the last two completed hours every hour. An hour above the Class A or emission standard, or a valid negative value on a main monitoring factor, triggers an hourly data-anomaly/exceedance alert. If the enterprise platform is unavailable, the runner automatically falls back to the Yili Prefecture platform.
+
 > Handing over or moving to a new machine? Read **[docs/HANDOVER.md](docs/HANDOVER.md)** first (architecture, setup, config, operations, troubleshooting, acceptance checklist).
 
 ## Push Examples
@@ -37,7 +39,16 @@ This project fully automates that routine: **it checks the transmission rate on 
 ```
 *("Unit 3 — operating-condition mark: shutdown, excluded from transmission-rate statistics")*
 
-**④ When the mark-sync function's cookie expires, a separate Bark alert fires** (at most once per day) to remind you to refresh the session.
+**④ When the local mark-sync cookie expires, a separate Bark alert fires** (at most once per day) to remind you to refresh the session.
+
+**⑤ Hourly data anomaly (separate Bark alert; checked every hour):**
+
+```
+⚠️ 小时数据异常 2026-10-25
+· 10-25 10时 3号机组 氮氧化物 实测 -1.234，折算 -1.512（数据有效，异常负值）
+```
+
+Multiple anomalies in the same hour are merged into one message. When data comes from the Yili fallback, the body says `数据源：伊犁州平台` (source: Yili Prefecture platform).
 
 Push channels: **Bark as primary** (free iOS app over public HTTPS); **email as fallback** (Resend HTTP API, auto-sent when Bark fails; optional — without it only Bark is used).
 
@@ -96,23 +107,65 @@ Core mechanisms:
 
 ```
 cloudflare-envsc/
+├── .github/workflows/test.yml # CI: Node.js 24, syntax checks, and the full test suite
 ├── config/
-│   └── project.json        # Business config (single source of truth): exclusions, company, thresholds, push window
-├── src/index.js            # Worker main: fetch, judge, compose, push, watchdog
+│   ├── project.json        # Business config (single source of truth): exclusions, company, thresholds, push window
+│   ├── standards.json      # Hourly-alert limits: Class A performance + emission standard
+│   └── yili-hourly-map.json # Fixed enterprise-point ↔ Yili Prefecture station mapping
+├── src/
+│   ├── index.js            # Worker orchestration: fetch, multi-source marks, backfill, watchdog
+│   ├── config.js           # Loads and validates config/project.json
+│   ├── core/
+│   │   ├── judge.js        # Transmission-rate judgment, wastewater exemption, shutdown exclusion
+│   │   ├── marks.js        # Mark v2 serialization, range coverage, standard-sample exemption
+│   │   ├── text.js         # Push-message composition (buildText)
+│   │   └── time.js         # UTC+8 date and D-1 helpers
+│   └── io/
+│       ├── enterprise.js   # Enterprise minute-level marks (relay/direct)
+│       ├── kv.js           # KV mark loading with v1/v2 compatibility
+│       ├── public.js       # Public-platform rate and hourly marks
+│       └── push.js         # Bark primary + email fallback
 ├── wrangler.toml           # Worker config: cron, vars, KV binding
 ├── tools/
 │   ├── scf-marks-sync/     # Mark-sync core (same codebase for cloud functions and local runs)
-│   ├── local-sync/         # Local fallback sync: scheduled runner + enterprise auto-login + logging
+│   ├── local-sync/         # Primary local sync, auto-login, hourly alarms, Yili fallback
+│   ├── yili/               # Yili Prefecture adapter: login, stations, factors, four raw-data types
 │   ├── push-now.mjs        # Local re-push / preview for a given date (reads KV snapshot)
 │   ├── kv-read.py          # Read/inspect KV contents
-│   ├── buildtext-test.mjs  # Message-format regression tests (27 cases)
-│   ├── merge-test.mjs      # Mark-merging regression tests (28 cases)
-│   ├── backfill-test.mjs   # Missing-report backfill tests (19 cases)
-│   ├── watchdog-test.mjs   # Watchdog regression tests
+│   ├── buildtext-test.mjs  # Message format (27 cases)
+│   ├── marksv2-test.mjs    # Mark v2 structured contract (15 cases)
+│   ├── merge-test.mjs      # Mark merging (28 cases)
+│   ├── windows-test.mjs    # Mark window extraction/merging (9 cases)
+│   ├── hourly-alarm-test.mjs # Hourly anomaly/exceedance rules and wording (41 cases)
+│   ├── yili-hourly-fallback-test.mjs # Yili hourly fallback (21 cases)
+│   ├── watchdog-test.mjs   # Watchdog (8 cases)
+│   ├── pubfail-test.mjs    # Public-platform failure alerts and idempotence (4 cases)
+│   ├── backfill-test.mjs   # Missing-report backfill (19 cases)
+│   ├── yili-test.mjs       # Yili adapter (45 cases)
 │   └── dump-*.mjs          # Raw-API diagnostic scripts for each data source
 ├── relay/                  # Enterprise HTTP → HTTPS relay (fly.io/Render/Docker, authenticated, optional)
 └── docs/                   # Upstream API documentation
 ```
+
+## Yili Prefecture Platform Adapter
+
+`tools/yili/` is a data adapter for the Yili Prefecture ecological-environment digital monitoring platform. It provides:
+
+- automatic four-character arithmetic image-CAPTCHA login, login wrapping, token caching, and re-login after expiry;
+- queries for 9 stations and their factor lists, plus realtime/minute/hour/day raw data;
+- full pagination at the platform `pageSize` limit of 5000, with row-count, total-count, and duplicate-`dt` consistency checks;
+- JSON/CSV/XLSX output and native platform XLSX export;
+- hourly-alarm fallback through explicit station IDs; only the platform's `N` flag is treated as valid, and the Yili platform is not contacted during normal operation.
+
+Credentials, tokens, and exports stay in ignored local directories. The example config uses `verifyTls=false` because of the platform certificate chain; enable that only in a controlled network.
+
+```powershell
+node tools/yili/cli.mjs auth
+node tools/yili/cli.mjs stations
+node tools/yili/cli.mjs query --station 川宁生物废水总排口 --type hour --date 2026-10-25
+```
+
+See [tools/yili/README.md](tools/yili/README.md) for the full CLI reference.
 
 ## Deployment
 
@@ -248,33 +301,47 @@ The platform only offers query APIs — no push. A local runner closes the loop:
 | Trigger | Windows task `ENVSC-Hourly-Alarm`, runs `tools/local-sync/hourly-alarm.cjs` at **:20 every hour** |
 | Window | The last **2 completed hours** (late data is caught on the next run); `--date/--hour` for manual checks |
 | Sources | Enterprise `online-monitor/data/list` (measured value / standard / validity) + `online-monitor/view/list` (converted series); factor codes from `/monitoritem/pollutant/list` |
+| Fallback | If the enterprise cookie, a monitoring point, or one point/hour is unavailable, the runner uses the fixed station mapping in `config/yili-hourly-map.json` and reads the Yili Prefecture hourly API; normal runs never contact it. `--yili-only` forces the fallback for drills |
 | Factor codes | Resolved at runtime (**NMHC=508**, PM=001, SO₂=002, NOₓ=003, COD=011, ammonia nitrogen=060) instead of hard-coded guesses |
 | Rule | **Gas uses the converted value**; **wastewater uses the measured value** (no conversion exists); wastewater pH uses `min_value`/`max_value` range judging; only `数据有效` rows are judged; strictly greater than the standard (`minRatio` configurable); a valid negative value on a main factor is also pushed as a data anomaly |
 | Two tiers | **Class A** (`config/standards.json` → `a`) and **emission standard** (configured value first, then platform `outlet_standard`). Class A: PM **10**, NMHC **30**; emission standard: SO₂ **35**, NOₓ **50** for units 3 / 1-2 (GB 13223-2011 ultra-low), PM 30, NMHC 100; outfall pH **6~9**, COD **50**, ammonia nitrogen **5** (GB 21903-2008 Table 3 special limits) |
 | Wording | A-level only → `超A级标准 30，超 x%；未超排放标准 100` (title “A级预警”); both → `超排放标准 100，超 x%；A级标准 30 亦超` (title “小时数据异常”); valid negative → `实测 -x，折算 -y（数据有效，异常负值）` (title “小时数据异常”) |
 | Dedup | KV `alarm:<date>:<hour>:<point>:<factor>:<tier>` (3-day TTL); an A-level warning escalates to a separate exceedance alert |
 | Push | Bark (`group=小时数据异常`, `timeSensitive`), one message per run |
-| Status | KV `last-hourly-alarm` (checked / exceeded / exceededLegal / exceededA / negative / pushed / missingStd) |
+| Status | KV `last-hourly-alarm` (checked / exceeded / exceededLegal / exceededA / negative / pushed / missingStd / sources / yiliFallback) |
 
 Manual dry run:
 
 ```bash
 node tools/local-sync/hourly-alarm.cjs --date 2026-10-22 --hour 11 --dry-run --verbose
+node tools/local-sync/hourly-alarm.cjs --date 2026-10-25 --hour 10 --dry-run --verbose --yili-only
 ```
 
 > The page-to-API field mapping (dry value = `avg_value_<code>`, standard = `outlet_standard_<code>`,
 > and how NMHC was confirmed as code 508) is documented in
 > [tools/local-sync/README.md](tools/local-sync/README.md#字段与页面核对2026-10-23).
+> The public platform has no complete series suitable for hourly concentration-threshold judging;
+> the anomaly path is enterprise platform → Yili Prefecture platform.
 
 ## Local Development & Testing
 
 ```bash
 npm run dev                        # run the Worker locally (wrangler dev)
 node tools/buildtext-test.mjs      # message-format rules, 27 cases
+node tools/marksv2-test.mjs        # mark v2 structured contract, 15 cases
 node tools/merge-test.mjs          # mark-merging rules, 28 cases
+node tools/windows-test.mjs        # mark window extraction/merging, 9 cases
+node tools/hourly-alarm-test.mjs   # hourly anomaly/exceedance rules and wording, 41 cases
+node tools/yili-hourly-fallback-test.mjs # Yili station/factor mapping and hourly fallback, 21 cases
+node tools/watchdog-test.mjs       # watchdog logic, 8 cases
+node tools/pubfail-test.mjs        # public-platform failure alerts and idempotence, 4 cases
 node tools/backfill-test.mjs       # queue, two-stage readiness gate, recovery, rate limit, dedup, 19 cases
-node tools/watchdog-test.mjs       # watchdog logic
+node tools/yili-test.mjs           # Yili login/pagination/fields/re-login, 45 cases
+
+# 217 cases total; CI runs the same suites on Node.js 24
 ```
+
+`.github/workflows/test.yml` runs on push / pull_request with **Node.js 24**: install dependencies, run syntax checks, then execute all 10 test suites above.
 
 Common operations:
 
