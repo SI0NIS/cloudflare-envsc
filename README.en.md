@@ -95,11 +95,11 @@ Core mechanisms:
 | **Multi-source mark merging** | Minute-level KV marks **override** hour-level public marks per monitoring point; the source is truthfully recorded (`kv`/`public`/`kv+public`/`relay`) for easy auditing |
 | **Watchdog** | After 13:05 CST the Worker self-checks whether today's marks landed in KV; the sync-interruption alert was turned off on 2026-10-22 (cloud functions retired in favor of local sync) — self-check results are still written to `last-watchdog` for troubleshooting |
 
-**Judging & message rules** (`buildText`, covered by 27 regression tests):
+**Judging & message rules** (`buildText`, covered by 32 regression tests):
 
 - **Abnormal point** = under-threshold ∪ shutdown-excluded ∪ has substantive marks;
 - **Wastewater exemption**: per the official algorithm, wastewater outlets may exclude up to 1 hour/day for standard-sample checks — a rate ≥ 95.83% counts as compliant; **auto marks inside the exempt window don't trigger a push** (only manual filings do; auto marks are still displayed);
-- **Manual marks take precedence over auto marks**: an auto-mark segment fully covered by a manual segment is suppressed; partial overlaps keep both (the two channels are independent and complementary);
+- **Manual marks override auto marks only for the same factor**: an auto segment is suppressed only when its time range is fully covered by a manual segment and all of its factors are included in that manual mark; different factors or partial overlaps are kept (the two channels are independent and complementary);
 - **Standard-sample-check segments are exempt from coverage suppression**: they still display when overlapping other anomaly windows;
 - Company rate at 100% with no anomalies → **title-only push** at `active` level; otherwise title + body at `timeSensitive` level.
 

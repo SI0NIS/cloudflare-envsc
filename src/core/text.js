@@ -1,8 +1,52 @@
 // core/text.js —— 推送文案组装（纯函数）
 import { effRate, isExcluded, isWastewaterOk } from './judge.js';
-import { v2SegsText, toMin, parseRanges, rangeCoveredByAny, isCheckSeg } from './marks.js';
+import { v2SegsText, toMin, parseRanges, isCheckSeg } from './marks.js';
 
 const pct = (v) => (v == null ? '—' : `${v}%`);
+// 人工标记只覆盖「同一因子」的自动段：时段必须完整包含，且自动段的因子需全部出现在人工段里。
+// 旧数据可能没有因子名（如「校准-自动监测设备处于校准」），此时退回纯时段覆盖，保持兼容。
+const ACTION_WORD = /校准|故障|维护|核查|有效|停运|异常|超标/;
+
+function normFactors(factors) {
+  const list = Array.isArray(factors) ? factors : (factors ? String(factors).split('/') : []);
+  return [...new Set(list.map((f) => String(f || '').trim()).filter(Boolean))];
+}
+
+function factorsCoveredBy(autoFactors, manualFactors) {
+  const auto = normFactors(autoFactors);
+  const man = normFactors(manualFactors);
+  if (!auto.length || !man.length) return true; // 无因子名的旧数据按原时段规则兼容
+  const set = new Set(man);
+  return auto.every((f) => set.has(f));
+}
+
+function textFactors(seg) {
+  const first = String(seg || '').trim()
+    .replace(/^\d{2,4}-\d{2}(?:-\d{2})?\s+/, '')
+    .split(/\s+/)[0] || '';
+  if (!first || ACTION_WORD.test(first)) return [];
+  return first.split('/').map((f) => f.trim()).filter((f) => f && !ACTION_WORD.test(f));
+}
+
+// v1 文本按换行分组，组内后续段沿用组头的因子名（如「颗粒物 校准…；日常维护…」）。
+function manualSegsFromText(text) {
+  const out = [];
+  for (const line of String(text || '').split(/\n/)) {
+    let groupFactors = [];
+    for (const part of line.split(/[；;]/).map((s) => s.trim()).filter(Boolean)) {
+      const own = textFactors(part);
+      if (own.length) groupFactors = own;
+      for (const [start, end] of parseRanges(part)) out.push({ start, end, factors: groupFactors });
+    }
+  }
+  return out;
+}
+
+function rangeCoveredByManualSegs(range, factors, manualSegs) {
+  const [a, b] = range;
+  if (a == null || b == null) return false;
+  return manualSegs.some((m) => a >= m.start && b <= m.end && factorsCoveredBy(factors, m.factors));
+}
 
 function buildText(data, j, marks) {
   const compact = data.date.replace(/-/g, '');
@@ -65,19 +109,22 @@ function buildText(data, j, marks) {
     const key = String(mp.mpName || '').trim();
     const m = marks && marks.byMp && marks.byMp.get(key);
     // 人工标记与自动标记是**两个互相独立的渠道**：同时存在且互不覆盖时都推送；人工优先级 > 自动，
-    //   某段自动被人工完全覆盖时抑制该段；仅当剩余自动（去日期前缀后）与人工完全相同才并成一行。
+    //   但只抑制「同一因子且时段被人工完整覆盖」的自动段；因子不同或部分重叠都保留。
+    //   仅当剩余自动（去日期前缀后）与人工完全相同才并成一行。
     if (m && m.v2) {
       // ===== v2 结构化路径（2026-10-22 波次2） =====
       const norm = (s) => String(s || '').replace(/\d{2}-\d{2}\s+/g, '').replace(/\s*\n\s*/g, '\n').trim();
       const manSegs = (m.v2.manual && m.v2.manual.segs) || [];
-      const manRanges = manSegs.map((s) => [toMin(s.start), toMin(s.end)]).filter((r) => r[0] != null && r[1] != null);
+      const manRanges = manSegs.map((s) => ({
+        start: toMin(s.start), end: toMin(s.end), factors: s.factors || [],
+      })).filter((s) => s.start != null && s.end != null);
       const man = manSegs.length ? norm(v2SegsText(manSegs, !!(m.v2.manual && m.v2.manual.noGroup))) : '';
       const autoAll = (m.v2.auto && m.v2.auto.segs) || [];
       const keptSegs = autoAll.filter((s) => {
         if (isCheckSeg(s.head)) return true;
         const a = toMin(s.start), b = toMin(s.end);
         if (a == null || b == null) return true;
-        return !rangeCoveredByAny([a, b], manRanges);
+        return !rangeCoveredByManualSegs([a, b], s.factors, manRanges);
       });
       const keptText = keptSegs.length ? norm(v2SegsText(keptSegs, false)) : '';
       if (man) {
@@ -91,18 +138,22 @@ function buildText(data, j, marks) {
     } else if (m) {
       const norm = (s) => String(s || '').replace(/\d{2}-\d{2}\s+/g, '').replace(/\s*\n\s*/g, '\n').trim();
       const man = norm(m.manual);
-      const manRanges = parseRanges(m.manual);
+      const manRanges = manualSegsFromText(m.manual);
       const rawAuto = String(m.auto || '');
       const groups = rawAuto.split('\n').map((g) => g.trim()).filter(Boolean);
       const keptGroups = [];
       for (const grp of groups) {
         const segs = grp.split('；').map((s) => s.trim()).filter(Boolean);
-        const kept = segs.filter((seg) => {
-          if (isCheckSeg(seg)) return true;
+        const kept = [];
+        let groupFactors = []; // 组内后续段沿用组头因子名（v1 文案的省略写法）
+        for (const seg of segs) {
+          const own = textFactors(seg);
+          if (own.length) groupFactors = own;
+          if (isCheckSeg(seg)) { kept.push(seg); continue; }
           const rngs = parseRanges(seg);
-          if (rngs.length === 0) return true;
-          return !rngs.every((r) => rangeCoveredByAny(r, manRanges));
-        });
+          if (rngs.length === 0) { kept.push(seg); continue; }
+          if (!rngs.every((r) => rangeCoveredByManualSegs(r, groupFactors, manRanges))) kept.push(seg);
+        }
         if (kept.length) keptGroups.push(kept.join('；'));
       }
       if (man) {

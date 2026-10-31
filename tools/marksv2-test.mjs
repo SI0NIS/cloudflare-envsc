@@ -154,6 +154,54 @@ check('④ 无标记点（总排口）不进异常列表', !body.includes('总�
   check('⑬ 交错因子各自成组（A、B、A 三组）', t === 'A 校准 01:00~01:10(11min)；\nB 校准 02:00~02:10(11min)；\nA 校准 03:00~03:10(11min)', t);
 }
 
+// ⑭ 人工标记只覆盖同因子：10.27 1号2号机组 v2/v1 输出必须一致且不吞流量等异常段
+{
+  const d = { date: '2026-10-27', monitorPoints: [
+    { mpName: '1号2号机组', realtime: { effeTransRate: 98.14 }, comple: { effeTransRate: 98.14 } },
+  ] };
+  const all = ['二氧化硫', '氧含量', '氮氧化物', '流量', '颗粒物'];
+  const v2 = { byMp: new Map([['1号2号机组', { v2: {
+    manual: { segs: [seg(['颗粒物'], '数据有效', '11:00', '11:59', 60)] },
+    auto: { segs: [
+      seg(all, '日常维护', '10:55', '10:59', 5),
+      seg(all, '校准', '11:00', '11:04', 5),
+      seg(all, '日常维护', '11:05', '11:07', 3),
+      seg(['氧含量', '氮氧化物', '流量', '颗粒物'], '校准', '11:08', '11:48', 41),
+      seg(['二氧化硫'], '校准', '11:08', '11:12', 5),
+      seg(['二氧化硫'], '故障', '11:13', '11:29', 17),
+      seg(['二氧化硫'], '校准', '11:30', '11:48', 19),
+      seg(['二氧化硫'], '故障', '11:36', '11:36', 1),
+      seg(all, '故障', '11:50', '11:50', 1),
+      seg(all, '校准', '11:51', '12:00', 10),
+    ] },
+  } }]]) };
+  const v1 = { byMp: new Map([['1号2号机组', {
+    manual: '颗粒物 数据有效 11:00~11:59(1h)',
+    auto: '二氧化硫/氧含量/氮氧化物/流量/颗粒物 日常维护 10:55~10:59(5min)；校准 11:00~11:04(5min)；日常维护 11:05~11:07(3min)；\n氧含量/氮氧化物/流量/颗粒物 校准 11:08~11:48(41min)；\n二氧化硫 校准 11:08~11:12(5min)；故障 11:13~11:29(17min)；校准 11:30~11:48(19min)；故障 11:36~11:36(1min)；\n二氧化硫/氧含量/氮氧化物/流量/颗粒物 故障 11:50~11:50(1min)；校准 11:51~12:00(10min)',
+  }]]) };
+  const b2 = buildText(d, { unitRate: 98.15 }, v2).body;
+  const b1 = buildText(d, { unitRate: 98.15 }, v1).body;
+  const canon = (t) => t.replace(/；\n/g, '\n'); // v2 分组分隔符比 v1 多一个分号
+  check('⑭a v2 与 v1 的 10.27 文案内容一致', canon(b2) === canon(b1), `v2:\n${b2}\nv1:\n${b1}`);
+  check('⑭b 不同因子首组校准段保留',
+    b2.includes('二氧化硫/氧含量/氮氧化物/流量/颗粒物 日常维护 10:55~10:59(5min)；校准 11:00~11:04(5min)；日常维护 11:05~11:07(3min)'), b2);
+  check('⑭c 氧含量/NOx/流量/颗粒物 41 分钟校准段保留',
+    b2.includes('氧含量/氮氧化物/流量/颗粒物 校准 11:08~11:48(41min)'), b2);
+  check('⑭d 11:50 故障与 11:51 校准保留',
+    b2.includes('二氧化硫/氧含量/氮氧化物/流量/颗粒物 故障 11:50~11:50(1min)；校准 11:51~12:00(10min)'), b2);
+}
+// ⑮ 纯颗粒物自动段仍受同因子人工标记抑制
+{
+  const d = { date: '2026-10-27', monitorPoints: [
+    { mpName: '1号2号机组', realtime: { effeTransRate: 98.14 }, comple: { effeTransRate: 98.14 } },
+  ] };
+  const m = { byMp: new Map([['1号2号机组', { v2: {
+    manual: { segs: [seg(['颗粒物'], '数据有效', '11:00', '11:59', 60)] },
+    auto: { segs: [seg(['颗粒物'], '校准', '11:10', '11:20', 11)] },
+  } }]]) };
+  const b = buildText(d, { unitRate: 98.15 }, m).body;
+  check('⑮ 纯颗粒物自动段被同因子人工覆盖', !b.includes('自动标记') && !b.includes('11:10~11:20'), b);
+}
 const failed = results.filter((r) => !r.pass);
 console.log(`\n${results.length - failed.length}/${results.length} PASS`);
 process.exit(failed.length ? 1 : 0);

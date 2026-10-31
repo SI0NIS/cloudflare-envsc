@@ -194,6 +194,39 @@ import { inPushWindow } from '../src/index.js';
   check('⑮e 0 点窗外', inPushWindow(0) === false);
 }
 
+// ⑯ 人工标记只覆盖对应因子（2026-10-27 1号2号机组真实夹具）：
+//    人工仅填「颗粒物 11:00~11:59」，不能吞掉同一切片里 SO2/氧含量/NOx/流量的校准与故障段。
+{
+  const d = { date: '2026-10-27', monitorPoints: [
+    { mpName: '1号2号机组', realtime: { effeTransRate: 98.14 }, comple: { effeTransRate: 98.14 } },
+  ] };
+  const m = { byMp: new Map([['1号2号机组', {
+    manual: '颗粒物 数据有效 11:00~11:59(1h)',
+    auto: '二氧化硫/氧含量/氮氧化物/流量/颗粒物 日常维护 10:55~10:59(5min)；校准 11:00~11:04(5min)；日常维护 11:05~11:07(3min)；\n氧含量/氮氧化物/流量/颗粒物 校准 11:08~11:48(41min)；\n二氧化硫 校准 11:08~11:12(5min)；故障 11:13~11:29(17min)；校准 11:30~11:48(19min)；故障 11:36~11:36(1min)；\n二氧化硫/氧含量/氮氧化物/流量/颗粒物 故障 11:50~11:50(1min)；校准 11:51~12:00(10min)',
+  }]]) };
+  const b = buildText(d, { unitRate: 98.15 }, m).body;
+  check('⑯a 人工仅覆盖颗粒物，其他因子首组校准仍展示',
+    b.includes('二氧化硫/氧含量/氮氧化物/流量/颗粒物 日常维护 10:55~10:59(5min)；校准 11:00~11:04(5min)；日常维护 11:05~11:07(3min)'), b);
+  check('⑯b 氧含量/NOx/流量/颗粒物 41 分钟校准段仍展示',
+    b.includes('氧含量/氮氧化物/流量/颗粒物 校准 11:08~11:48(41min)'), b);
+  check('⑯c 二氧化硫校准/故障段仍展示',
+    b.includes('二氧化硫 校准 11:08~11:12(5min)；故障 11:13~11:29(17min)；校准 11:30~11:48(19min)；故障 11:36~11:36(1min)'), b);
+  check('⑯d 11:50 故障与 11:51 校准仍展示',
+    b.includes('二氧化硫/氧含量/氮氧化物/流量/颗粒物 故障 11:50~11:50(1min)；校准 11:51~12:00(10min)'), b);
+}
+// ⑰ 同因子自动段仍应被人工覆盖（防止修复扩大展示范围）
+{
+  const d = { date: '2026-10-27', monitorPoints: [
+    { mpName: '1号2号机组', realtime: { effeTransRate: 98.14 }, comple: { effeTransRate: 98.14 } },
+  ] };
+  const m = { byMp: new Map([['1号2号机组', {
+    manual: '颗粒物 数据有效 11:00~11:59(1h)',
+    auto: '颗粒物 校准 11:10~11:20(11min)；故障 11:25~11:30(6min)',
+  }]]) };
+  const b = buildText(d, { unitRate: 98.15 }, m).body;
+  check('⑰ 纯颗粒物自动段（含组内省略因子）仍被同因子人工覆盖',
+    !b.includes('自动标记') && !b.includes('11:10~11:20') && !b.includes('11:25~11:30'), b);
+}
 const failed = results.filter((x) => !x.pass).length;
 console.log(`\n${results.length - failed}/${results.length} PASS`);
 process.exit(failed ? 1 : 0);
