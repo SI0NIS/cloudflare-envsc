@@ -218,7 +218,10 @@ Register-ScheduledTask -TaskName "ENVSC-SCF-Local-Sync" -Action $a -Trigger $t1 
 $a2 = New-ScheduledTaskAction -Execute "node.exe" -Argument '"<repo>\tools\local-sync\run_scf_local.cjs" --if-missing' -WorkingDirectory "<repo>"
 $t2 = New-ScheduledTaskTrigger -AtLogOn
 Register-ScheduledTask -TaskName "ENVSC-SCF-Local-Sync-Logon" -Action $a2 -Trigger $t2 -Force
+
 ```
+
+> If the scheduled-task console is mouse-selected, Windows enters Mark/Select mode and pauses Node stdout, which looks like a hung black window. This machine disables QuickEdit for `node.exe`; for a reinstall or another PC, follow [tools/local-sync/README.md](tools/local-sync/README.md) or launch through `run-node-hidden.vbs`.
 
 Sync logic: validate the cookie (on failure, refresh via puppeteer auto-login) → scrape D-1 marks per monitoring point → write KV `marks:<YYYY-MM-DD>` (payload carries a `sync` completeness section); on failure, one Bark alert per day. The cloud-function era env vars (`CNEMC_COOKIE`/`CF_ACCOUNT_ID`/…) are replaced by `tools/local-sync/local-config.json` on the local setup.
 

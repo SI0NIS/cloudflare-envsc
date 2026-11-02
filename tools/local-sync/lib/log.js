@@ -32,8 +32,9 @@ function createLogger(name, logDir) {
   rotateIfNeeded(file);
   function log(msg) {
     const line = `[${new Date().toISOString()}] ${msg}`;
-    console.log(line);
+    // 先落盘再写控制台：控制台若被 QuickEdit/标记模式暂停，至少日志仍完整可查。
     try { fs.appendFileSync(file, line + '\n', 'utf8'); } catch (e) { /* ignore */ }
+    try { console.log(line); } catch (e) { /* ignore */ }
   }
   return { log, file };
 }

@@ -16,6 +16,7 @@
 | `lib/exceed.js` | 数据异常/超标判定纯函数（可单测；`tools/hourly-alarm-test.mjs` 覆盖） |
 | `lib/yili-hourly-fallback.cjs` | 企业端小时数据不可用时的伊犁州平台兜底：显式站点映射、因子归一化、小时查询缓存（`tools/yili-hourly-fallback-test.mjs` 覆盖） |
 | `lib/log.js` | 共享日志（1MB 轮转） |
+| `run-node-hidden.vbs` | 可选的无窗口启动包装器（`wscript.exe` 调用，隐藏 Node 控制台并透传退出码） |
 | `local-config.example.json` | 配置模板，复制为 `local-config.json` 并填入密钥（**已被 gitignore**） |
 
 运行时数据都在 `runtime/`（**已被 gitignore**）：`cnemc-cookie.txt`、`logs/`。
@@ -104,6 +105,17 @@ $set     = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit 
            -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
 Register-ScheduledTask -TaskName "ENVSC-Hourly-Alarm" -Action $action -Trigger $trigger -Settings $set -Force
 ```
+
+> **控制台「假死」排查**：计划任务直接启动 `node.exe` 时会带控制台窗口；若鼠标拖选窗口，Windows 会进入「选择/标记」模式并暂停 Node 的 stdout，表现为黑窗长时间无输出。可对当前用户的 `node.exe` 关闭 QuickEdit：
+>
+> ```powershell
+> $node = (Get-Command node).Source
+> $key = 'HKCU:\Console\' + ($node -replace '\\','_')
+> New-Item -Path $key -Force | Out-Null
+> New-ItemProperty -Path $key -Name QuickEdit -PropertyType DWord -Value 0 -Force | Out-Null
+> ```
+>
+> 需要完全无窗口时，由管理员把任务 Action 改为 `wscript.exe "<repo>\tools\local-sync\run-node-hidden.vbs" "<node.exe>" "<script.js>" [args]`；包装器会隐藏窗口并透传退出码。
 
 ## Windows 计划任务（每天 14:40 + 登录时补缺）
 

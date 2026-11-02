@@ -213,7 +213,10 @@ Register-ScheduledTask -TaskName "ENVSC-SCF-Local-Sync" -Action $a -Trigger $t1 
 $a2 = New-ScheduledTaskAction -Execute "node.exe" -Argument '"<repo>\tools\local-sync\run_scf_local.cjs" --if-missing' -WorkingDirectory "<repo>"
 $t2 = New-ScheduledTaskTrigger -AtLogOn
 Register-ScheduledTask -TaskName "ENVSC-SCF-Local-Sync-Logon" -Action $a2 -Trigger $t2 -Force
+
 ```
+
+> 计划任务的控制台若被鼠标拖选，会进入「选择/标记」模式并暂停 Node 输出，表现为黑窗无响应；本机已对 `node.exe` 关闭 QuickEdit。重装或换机时按 [tools/local-sync/README.md](tools/local-sync/README.md) 的说明处理，或用 `run-node-hidden.vbs` 无窗口启动。
 
 同步逻辑：先校验 cookie（无效则 puppeteer 自动登录续期）→ 抓 D-1 各监测点标记 → 写 KV `marks:<YYYY-MM-DD>`（载荷带 `sync` 完备性信息）；失败 Bark 告警（每天一次）。云函数时代的环境变量方式（`CNEMC_COOKIE`/`CF_ACCOUNT_ID`/…）在本机由 `local-config.json` 取代。
 

@@ -174,6 +174,8 @@ Register-ScheduledTask -TaskName "ENVSC-Hourly-Alarm" -Action $a3 -Trigger $t3 -
 
 > 注意：一个任务的 action 只能带一套参数，所以「14:40 正式」和「登录补缺」必须是**两个任务**。
 
+> **控制台选中会假死**：鼠标拖选计划任务的 Node 控制台会进入「选择/标记」模式并暂停 stdout。对当前用户 `node.exe` 关闭 QuickEdit，或由管理员改用 `wscript.exe` + `tools/local-sync/run-node-hidden.vbs` 无窗口启动；详见 `tools/local-sync/README.md`。
+
 ### 4.5 Worker（通常无需重建）
 
 线上已有 `envsc`。只有需要改代码时才部署：
